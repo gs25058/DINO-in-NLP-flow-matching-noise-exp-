@@ -1,16 +1,9 @@
-# R2: anchor 모드 + curriculum + K=3 (본 제안 기본형)
+# R2: anchor 모드 + curriculum + K=3 (본 제안 기본형, METHOD.md §6)
 # 다른 run은 이 파일을 복사해 augment/loss 블록만 바꾼다. 코드 분기 금지.
+extends: base.yaml
 
 run_name: r2_anchor_curriculum
 seed: 42            # 시드 2개 이상: 42, 43
-
-model:
-  backbone: answerdotai/ModernBERT-base
-  pooling: mean
-  head:               # 기존 실험과 동일 (Table 1)
-    logit_dim: 8192
-    bottleneck_dim: 256
-    hidden_dim: 2048
 
 augment:
   kind: flow_noise
@@ -20,9 +13,8 @@ augment:
   t_start: 0.05
   t_max: 0.5
   warmup_frac: 0.4    # t_hi curriculum: 전체 step의 40%까지 선형 증가
-  delta_t: 0.1        # consistency 모드에서만 사용
+  delta_t: 0.1        # anchor 모드에서는 미사용
   time_embed: false
-  stats_num_sentences: 10000   # 표준화 μ, σ 추정용
 
 loss:
   teacher_temp: 0.082
@@ -30,31 +22,3 @@ loss:
   center_momentum: 0.920
   velocity_head: false
   velocity_lambda: 0.05
-
-train:                # 기존 Table 1 고정
-  batch_size: 32
-  max_steps: 1500
-  optimizer: adamw
-  lr: 5.4e-4
-  weight_decay: 0.226
-  scheduler: warmup_cosine
-  warmup_frac: 0.1
-  teacher_momentum: 0.997
-
-data:
-  dataset: HuggingFaceFW/fineweb
-  subset: sample-10BT
-  min_chars: 10
-  max_tokens: 128
-  num_sentences: 1000000
-
-eval:
-  every_steps: 250
-  sts_task: STSBenchmark
-  length_probe: true
-  log_rank_metrics: true
-  log_batch_kl: true     # 조건부 붕괴 경보
-
-logging:
-  backend: wandb        # 오프라인 노드면 wandb offline 모드
-  log_every: 10
