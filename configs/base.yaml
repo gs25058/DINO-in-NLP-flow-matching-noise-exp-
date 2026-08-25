@@ -1,0 +1,34 @@
+# 공통 설정 (Table 1 고정값 + 데이터/평가 경로). run별 config는 `extends: base.yaml`로
+# 상속하고 run_name/seed/augment/loss 블록만 오버라이드한다. 코드 분기 금지 (CLAUDE.md 원칙 1).
+
+model:
+  backbone: answerdotai/ModernBERT-base
+  pooling: mean
+  head:
+    logit_dim: 8192       # Table 1
+    bottleneck_dim: 256   # 근거 문서 없는 신규 결정 (METHOD.md §4.1)
+
+train:
+  batch_size: 32
+  max_steps: 1500
+  optimizer: adamw
+  lr: 5.4e-4
+  weight_decay: 0.226
+  scheduler: warmup_cosine   # linear warmup(warmup_frac) + cosine decay
+  warmup_frac: 0.1
+  teacher_momentum: 0.997
+
+data:
+  sentences_path: data/sentences.jsonl
+  rank_eval_path: data/rank_eval_sentences.jsonl
+  embed_stats_path: data/embed_stats.pt
+  max_tokens: 128
+
+eval:
+  every_steps: 250
+  log_every_steps: 10
+  batch_kl_pairs: 256
+
+logging:
+  backend: wandb
+  wandb_mode: offline   # 오프라인 노드/승인 전이라 기본 offline

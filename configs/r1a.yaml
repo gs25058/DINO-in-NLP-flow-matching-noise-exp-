@@ -1,0 +1,23 @@
+# R1a: anchor 모드, t 고정 0.1, curriculum 없음, K=1 (METHOD.md §6)
+extends: base.yaml
+
+run_name: r1a_t010_fixed
+seed: 42   # 시드 2개 이상 필요 (매트릭스 실행 시 43 등 추가)
+
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 1
+  t_lo: 0.1
+  t_start: 0.1
+  t_max: 0.1      # t_lo=t_start=t_max -> U(t_lo,t_hi)가 항상 0.1로 붕괴 (고정 t)
+  warmup_frac: 0.0
+  delta_t: 0.1     # anchor 모드에서는 미사용
+  time_embed: false
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: false
+  velocity_lambda: 0.05
