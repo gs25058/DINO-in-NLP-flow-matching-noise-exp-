@@ -180,6 +180,11 @@ def main():
             wandb.log({"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}, step=step)
             print(f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}")
 
+    ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(student.state_dict(), ckpt_path)
+    print(f"[train] saved checkpoint -> {ckpt_path}")
+
     wandb.finish()
 
 
