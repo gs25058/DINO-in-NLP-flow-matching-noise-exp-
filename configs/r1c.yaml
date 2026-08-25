@@ -1,0 +1,23 @@
+# R1c: anchor 모드, t 고정 0.5, curriculum 없음, K=1 (METHOD.md §6)
+extends: base.yaml
+
+run_name: r1c_t050_fixed
+seed: 42
+
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 1
+  t_lo: 0.5
+  t_start: 0.5
+  t_max: 0.5
+  warmup_frac: 0.0
+  delta_t: 0.1
+  time_embed: false
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: false
+  velocity_lambda: 0.05

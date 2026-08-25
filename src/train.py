@@ -64,13 +64,19 @@ def build_augment(cfg: dict) -> FlowNoiseAug:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--max-steps", type=int, default=None, help="config의 train.max_steps override (스모크용)")
+    parser.add_argument("--max-steps", type=int, default=None, help="config의 train.max_steps override (스모크/3000-step 연장판용)")
+    parser.add_argument("--seed", type=int, default=None, help="config의 seed override (매트릭스 다중 시드용)")
+    parser.add_argument("--run-name-suffix", default="", help="wandb run_name에 덧붙일 접미사 (예: _seed43)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.max_steps is not None:
         cfg["train"]["max_steps"] = args.max_steps
+    if args.seed is not None:
+        cfg["seed"] = args.seed
+    if args.run_name_suffix:
+        cfg["run_name"] = cfg["run_name"] + args.run_name_suffix
 
     torch.manual_seed(cfg["seed"])
     random.seed(cfg["seed"])

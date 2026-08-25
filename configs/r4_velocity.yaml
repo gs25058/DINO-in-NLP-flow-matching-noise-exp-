@@ -1,0 +1,23 @@
+# R4: R2와 동일(anchor, curriculum, K=3) + velocity loss λ=0.05 (METHOD.md §6)
+extends: base.yaml
+
+run_name: r4_anchor_curriculum_velocity
+seed: 42
+
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 3
+  t_lo: 0.02
+  t_start: 0.05
+  t_max: 0.5
+  warmup_frac: 0.4
+  delta_t: 0.1
+  time_embed: false
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: true
+  velocity_lambda: 0.05
