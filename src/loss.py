@@ -65,6 +65,24 @@ class DINOLoss(nn.Module):
         return loss, aux
 
 
+def batch_kl_diagnostic(
+    student_logits: list[torch.Tensor], student_temp: float, n_pairs: int = 256
+) -> torch.Tensor:
+    """METHOD.md §5 batch-KL: 배치 내 모든 student 뷰 출력(N=B*K개) 중 무작위 n_pairs 샘플,
+    대칭화 KL 평균. →0이면 조건부 붕괴 경보."""
+    all_logits = torch.cat(student_logits, dim=0)  # [N, logit_dim]
+    probs = F.softmax(all_logits / student_temp, dim=-1)
+    log_probs = torch.log(probs.clamp_min(1e-12))
+    n = probs.shape[0]
+    idx_i = torch.randint(0, n, (n_pairs,), device=probs.device)
+    idx_j = torch.randint(0, n, (n_pairs,), device=probs.device)
+    p_i, p_j = probs[idx_i], probs[idx_j]
+    lp_i, lp_j = log_probs[idx_i], log_probs[idx_j]
+    kl_ij = (p_i * (lp_i - lp_j)).sum(dim=-1)
+    kl_ji = (p_j * (lp_j - lp_i)).sum(dim=-1)
+    return ((kl_ij + kl_ji) / 2).mean()
+
+
 def velocity_loss(
     v_pred: torch.Tensor,
     eps: torch.Tensor,
