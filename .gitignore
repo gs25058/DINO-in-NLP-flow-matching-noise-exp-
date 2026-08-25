@@ -1,0 +1,29 @@
+# 데이터/캐시 (prepare_data.py로 재생성 가능)
+data/
+scratch/
+.hf_home/
+.uv_cache/
+
+# 학습 산출물
+results/logs/
+results/figures/
+checkpoints/
+wandb/
+
+# 참고자료 중 대용량 중첩 git 저장소 (9GB, referecne_files/*.pdf만 포함)
+referecne_files/Unsupervised-Context-Embedding/
+
+# 세션 부산물
+*.ipynb_checkpoints/
+*claude*.txt
+
+# 파이썬/도구
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.pt
+*.pth
+
+# uv.lock은 재현성을 위해 반드시 포함 (ignore 금지)
+!uv.lock

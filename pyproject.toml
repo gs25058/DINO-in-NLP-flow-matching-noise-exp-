@@ -1,0 +1,35 @@
+[project]
+name = "flowdino-text"
+version = "0.1.0"
+description = "DINO-style self-distillation for text embeddings with flow-matching noise augmentation"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch==2.5.1",
+    "transformers>=4.48",
+    "datasets>=3.2",
+    "mteb>=1.34",
+    "pysbd>=0.3.4",
+    "scikit-learn>=1.5",      # 길이 probing (ridge)
+    "einops>=0.8",
+    "pyyaml>=6.0",
+    "wandb>=0.19",
+    "matplotlib>=3.9",
+    "pytest>=8.0",
+]
+
+# 공용 서버 CUDA 드라이버에 맞게 인덱스 선택.
+# `nvidia-smi`로 확인 후 cu121/cu124 중 조정할 것.
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+# uv.lock을 반드시 커밋할 것 (팀원/서버 간 재현성)
