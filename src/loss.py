@@ -42,12 +42,17 @@ class DINOLoss(nn.Module):
         """
         teacher_logits: [B, logit_dim] (단일 teacher 뷰)
         student_logits: K x [B, logit_dim]
-        반환: (loss, aux_dict={"H_pt", "KL_pt_ps"})  둘 다 배치·K뷰 평균, 로깅용(detached)
+        반환: (loss, aux_dict={"H_pt", "KL_pt_ps", "H_p_bar_t"})  배치·K뷰 평균, 로깅용(detached)
         """
         centered = teacher_logits.detach() - self.center
         p_t = F.softmax(centered / teacher_temp, dim=-1)
         log_p_t = torch.log(p_t.clamp_min(1e-12))
         h_pt = -(p_t * log_p_t).sum(dim=-1).mean()  # H(p_t), teacher 온도에만 의존
+
+        # marginal usage entropy H(p_bar_t) (R5, METHOD.md §5): 8192개 prototype 사용 균형 진단.
+        # H(p_t)(샘플별 평균)와 별개 지표. 상한 log(logit_dim); 0에 가까우면 소수 prototype만 사용(붕괴).
+        p_bar_t = p_t.mean(dim=0)
+        h_p_bar_t = -(p_bar_t * torch.log(p_bar_t.clamp_min(1e-12))).sum()
 
         ce_list = []
         for s_logits in student_logits:
@@ -61,7 +66,7 @@ class DINOLoss(nn.Module):
         if update_center:
             self._update_center(teacher_logits)
 
-        aux = {"H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps}
+        aux = {"H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps, "H_p_bar_t": h_p_bar_t.detach()}
         return loss, aux
 
 

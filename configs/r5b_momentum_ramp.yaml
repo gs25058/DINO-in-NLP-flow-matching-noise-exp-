@@ -1,0 +1,28 @@
+# R5b: R2(anchor+curriculum+K=3) + teacher momentum cosine ramp만 추가 (DINO 원본 방식).
+extends: base.yaml
+
+run_name: r5b_momentum_ramp
+seed: 42
+
+train:
+  teacher_momentum: 0.997   # EMATeacher 초기값(스케줄 시작점과 동일하게)
+  momentum_start: 0.997
+  momentum_end: 0.9995
+
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 3
+  t_lo: 0.02
+  t_start: 0.05
+  t_max: 0.5
+  warmup_frac: 0.4
+  delta_t: 0.1
+  time_embed: false
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: false
+  velocity_lambda: 0.05

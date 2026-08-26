@@ -20,6 +20,7 @@ from src.augment import FlowNoiseAug
 from src.evaluate import effective_rank_metrics, sts_b_dev_spearman
 from src.loss import DINOLoss, batch_kl_diagnostic, velocity_loss
 from src.model import DinoTextModel, EMATeacher
+from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -112,7 +113,15 @@ def main():
     warmup_steps = max(1, int(cfg["train"]["warmup_frac"] * max_steps))
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps)
 
-    teacher_temp = cfg["loss"]["teacher_temp"]
+    teacher_temp_static = cfg["loss"]["teacher_temp"]
+    warmup_teacher_temp = cfg["loss"].get("warmup_teacher_temp")
+    teacher_temp_warmup_frac = cfg["loss"].get("teacher_temp_warmup_frac")
+    teacher_temp_warmup_steps = (
+        max(1, int(teacher_temp_warmup_frac * max_steps)) if warmup_teacher_temp is not None else None
+    )
+    momentum_start = cfg["train"].get("momentum_start")
+    momentum_end = cfg["train"].get("momentum_end")
+
     student_temp = cfg["loss"]["student_temp"]
     max_tokens = cfg["data"]["max_tokens"]
     batch_size = cfg["train"]["batch_size"]
@@ -130,6 +139,11 @@ def main():
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
         special_mask = enc["special_tokens_mask"].bool().to(device) | (~attention_mask.bool())
+
+        if warmup_teacher_temp is not None:
+            teacher_temp = teacher_temp_schedule(step, warmup_teacher_temp, teacher_temp_static, teacher_temp_warmup_steps)
+        else:
+            teacher_temp = teacher_temp_static
 
         token_embeds = student.get_input_embeddings()(input_ids)
         views = aug(token_embeds, special_mask, step)
@@ -157,6 +171,8 @@ def main():
         total_loss.backward()
         optimizer.step()
         scheduler.step()
+        if momentum_start is not None:
+            teacher.momentum = teacher_momentum_schedule(step, momentum_start, momentum_end, max_steps)
         teacher.update(student)
 
         if step % log_every == 0 or step == max_steps - 1:
@@ -167,9 +183,14 @@ def main():
                 "H_pt": aux["H_pt"].item(),
                 "KL_pt_ps": aux["KL_pt_ps"].item(),
                 "batch_KL": b_kl.item(),
+                "H_p_bar_t": aux["H_p_bar_t"].item(),
             }
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if warmup_teacher_temp is not None:
+                log["teacher_temp"] = teacher_temp
+            if momentum_start is not None:
+                log["teacher_momentum"] = teacher.momentum
             wandb.log(log, step=step)
             print(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 

@@ -1,0 +1,24 @@
+# R5c (최우선): R2에서 curriculum 제거, t ~ U(0.35, 0.5) 고정 구간, K=3.
+# 근거: 매트릭스에서 R1c(고정 t=0.5, K=1)가 최고 성능이었음 - K=3으로 확장해 검증.
+extends: base.yaml
+
+run_name: r5c_fixed_high_t
+seed: 42
+
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 3
+  t_lo: 0.35
+  t_start: 0.5
+  t_max: 0.5      # t_start=t_max=0.5 -> t_hi(step)는 항상 0.5, curriculum 없음(즉시 고정 구간)
+  warmup_frac: 0.0
+  delta_t: 0.1
+  time_embed: false
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: false
+  velocity_lambda: 0.05
