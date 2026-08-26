@@ -1,0 +1,35 @@
+# base.yaml과 동일하되 backbone만 bert-base-uncased로 교체 (백본 비교 실험, backbone-bert-base 브랜치).
+# ModernBERT 전용 값(logit_dim/bottleneck_dim 등 Table 1 관련)은 그대로 유지 - 노이즈 방법론
+# 자체의 백본 민감도를 보는 것이 목적이라 다른 하이퍼파라미터는 손대지 않는다.
+
+model:
+  backbone: bert-base-uncased
+  pooling: mean
+  head:
+    logit_dim: 8192
+    bottleneck_dim: 256
+
+train:
+  batch_size: 32
+  max_steps: 1500
+  optimizer: adamw
+  lr: 5.4e-4
+  weight_decay: 0.226
+  scheduler: warmup_cosine
+  warmup_frac: 0.1
+  teacher_momentum: 0.997
+
+data:
+  sentences_path: data/sentences.jsonl
+  rank_eval_path: data/rank_eval_sentences.jsonl
+  embed_stats_path: data/embed_stats_bert_base_uncased.pt
+  max_tokens: 128
+
+eval:
+  every_steps: 250
+  log_every_steps: 10
+  batch_kl_pairs: 256
+
+logging:
+  backend: wandb
+  wandb_mode: offline

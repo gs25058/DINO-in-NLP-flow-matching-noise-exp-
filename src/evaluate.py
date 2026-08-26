@@ -149,17 +149,23 @@ def main():
         ckpt_path = run_dir / f"{args.which}.pt"
         if not ckpt_path.exists():
             continue
+        ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=True)
+        if isinstance(ckpt, dict) and "state_dict" in ckpt and "model_cfg" in ckpt:
+            state_dict, model_cfg = ckpt["state_dict"], ckpt["model_cfg"]
+        else:
+            state_dict, model_cfg = ckpt, base_cfg["model"]  # 구버전 체크포인트(raw state_dict)
         model = DinoTextModel(
-            base_cfg["model"]["backbone"],
-            base_cfg["model"]["head"]["bottleneck_dim"],
-            base_cfg["model"]["head"]["logit_dim"],
+            model_cfg["backbone"], model_cfg["head"]["bottleneck_dim"], model_cfg["head"]["logit_dim"]
         ).to(args.device)
-        model.load_state_dict(torch.load(ckpt_path, map_location=args.device, weights_only=True))
+        model.load_state_dict(state_dict)
         model.eval()
 
-        scores = sts_suite_spearman(model, tokenizer, args.device)
-        len_r2 = length_probing_r2(model, tokenizer, args.device)
-        eff_rank, max_sv = effective_rank_metrics(model, tokenizer, rank_eval_sentences, args.device)
+        run_tokenizer = tokenizer if model_cfg["backbone"] == base_cfg["model"]["backbone"] \
+            else AutoTokenizer.from_pretrained(model_cfg["backbone"])
+
+        scores = sts_suite_spearman(model, run_tokenizer, args.device)
+        len_r2 = length_probing_r2(model, run_tokenizer, args.device)
+        eff_rank, max_sv = effective_rank_metrics(model, run_tokenizer, rank_eval_sentences, args.device)
 
         row = {"run": run_dir.name, **scores, "length_probe_r2": len_r2,
                "effective_rank": eff_rank, "max_sv_ratio": max_sv}

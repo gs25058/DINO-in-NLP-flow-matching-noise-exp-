@@ -119,6 +119,7 @@ def main():
     log_every = cfg["eval"]["log_every_steps"]
     eval_every = cfg["eval"]["every_steps"]
     n_pairs = cfg["eval"]["batch_kl_pairs"]
+    log_grad_norm = cfg["train"].get("log_grad_norm", False)
 
     student.train()
     for step in range(max_steps):
@@ -155,6 +156,11 @@ def main():
 
         optimizer.zero_grad()
         total_loss.backward()
+        grad_norm = None
+        if log_grad_norm:
+            # max_norm=1e10 -> 사실상 clip 없이 norm만 측정 (진단용, 기본 off)
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=1e10).item()
+            wandb.log({"grad_norm": grad_norm}, step=step)
         optimizer.step()
         scheduler.step()
         teacher.update(student)
@@ -170,6 +176,8 @@ def main():
             }
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if grad_norm is not None:
+                log["grad_norm"] = grad_norm
             wandb.log(log, step=step)
             print(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
@@ -182,7 +190,7 @@ def main():
 
     ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(student.state_dict(), ckpt_path)
+    torch.save({"state_dict": student.state_dict(), "model_cfg": cfg["model"]}, ckpt_path)
     print(f"[train] saved checkpoint -> {ckpt_path}")
 
     wandb.finish()
