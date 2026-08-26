@@ -5,10 +5,13 @@ scratch/
 .uv_cache/
 
 # 학습 산출물
-results/logs/
-results/figures/
+results/
 checkpoints/
 wandb/
+
+# 프로젝트 지시문/방법 스펙 (내부용, repo에는 불필요)
+CLAUDE.md
+METHOD.md
 
 # 참고자료 (개인 문서/대용량 중첩 git 저장소, 코드와 무관 - 레포에 불필요)
 referecne_files/
