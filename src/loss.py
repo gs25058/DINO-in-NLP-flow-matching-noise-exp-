@@ -49,6 +49,10 @@ class DINOLoss(nn.Module):
         log_p_t = torch.log(p_t.clamp_min(1e-12))
         h_pt = -(p_t * log_p_t).sum(dim=-1).mean()  # H(p_t), teacher 온도에만 의존
 
+        # marginal usage entropy H(p_bar_t) (R5, METHOD.md §5): 8192개 prototype 사용 균형 진단.
+        p_bar_t = p_t.mean(dim=0)
+        h_p_bar_t = -(p_bar_t * torch.log(p_bar_t.clamp_min(1e-12))).sum()
+
         ce_list = []
         for s_logits in student_logits:
             log_p_s = F.log_softmax(s_logits / student_temp, dim=-1)
@@ -61,7 +65,7 @@ class DINOLoss(nn.Module):
         if update_center:
             self._update_center(teacher_logits)
 
-        aux = {"H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps}
+        aux = {"H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps, "H_p_bar_t": h_p_bar_t.detach()}
         return loss, aux
 
 
