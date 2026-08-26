@@ -88,7 +88,8 @@ def plot_run(name: str, d: dict, out_dir: Path) -> Path | None:
     return out_path
 
 
-def plot_comparison(all_data: dict, out_dir: Path) -> Path | None:
+def plot_comparison(all_data: dict, out_dir: Path, out_name: str = "comparison_sts_b_eff_rank.png",
+                     title: str = "Cross-run comparison: STS-B dev / effective rank") -> Path | None:
     complete = {name: d for name, d in all_data.items() if d["eval"]}
     if not complete:
         return None
@@ -103,9 +104,9 @@ def plot_comparison(all_data: dict, out_dir: Path) -> Path | None:
     axes[1].set_ylabel("effective rank")
     axes[1].set_xlabel("step")
     axes[0].legend(fontsize=6, ncol=2)
-    axes[0].set_title("Cross-run comparison: STS-B dev / effective rank")
+    axes[0].set_title(title)
     fig.tight_layout()
-    out_path = out_dir / "comparison_sts_b_eff_rank.png"
+    out_path = out_dir / out_name
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
@@ -142,6 +143,14 @@ def main():
     cmp_path = plot_comparison(all_data, OUT_DIR)
     if cmp_path:
         written.append(cmp_path)
+
+    bert_data = {name: d for name, d in all_data.items() if "bert" in name}
+    bert_cmp_path = plot_comparison(
+        bert_data, OUT_DIR, out_name="comparison_bert.png",
+        title="BERT backbone runs: STS-B dev / effective rank",
+    )
+    if bert_cmp_path:
+        written.append(bert_cmp_path)
 
     print(f"[plot_logs] {len(written)}개 그래프 저장 완료 -> {OUT_DIR}")
     for p in written:
