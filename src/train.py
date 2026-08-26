@@ -6,8 +6,10 @@
 """
 import argparse
 import json
+import logging
 import os
 import random
+import sys
 from pathlib import Path
 
 import torch
@@ -23,6 +25,25 @@ from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def setup_logger(run_name: str) -> logging.Logger:
+    """run별 폴더(results/logs/<run_name>/train.log)에 기록 + 콘솔 동시 출력.
+    미처리 예외도 logger.exception()으로 이 파일에 남긴다."""
+    log_dir = ROOT / "results" / "logs" / run_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("flowdino.train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+    fmt = logging.Formatter("%(message)s")
+    fh = logging.FileHandler(log_dir / "train.log", mode="a", encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
 
 
 def load_config(path) -> dict:
@@ -84,9 +105,19 @@ def main():
     device = args.device
     max_steps = cfg["train"]["max_steps"]
 
+    logger = setup_logger(cfg["run_name"])
+
     os.environ.setdefault("WANDB_MODE", cfg["logging"].get("wandb_mode", "offline"))
     wandb.init(project="flowdino-text", name=cfg["run_name"], config=cfg)
 
+    try:
+        _run(cfg, device, max_steps, logger)
+    except Exception:
+        logger.exception("training crashed")
+        raise
+
+
+def _run(cfg, device, max_steps, logger) -> None:
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
     sentences = load_sentences(ROOT / cfg["data"]["sentences_path"])
     rank_eval_sentences = load_sentences(ROOT / cfg["data"]["rank_eval_path"])
@@ -192,19 +223,19 @@ def main():
             if momentum_start is not None:
                 log["teacher_momentum"] = teacher.momentum
             wandb.log(log, step=step)
-            print(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
+            logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
         if step % eval_every == 0 or step == max_steps - 1:
             sts = sts_b_dev_spearman(student, tokenizer, device)
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
             student.train()
             wandb.log({"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}, step=step)
-            print(f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}")
+            logger.info(f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}")
 
     ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(student.state_dict(), ckpt_path)
-    print(f"[train] saved checkpoint -> {ckpt_path}")
+    logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 
     wandb.finish()
 
