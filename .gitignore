@@ -10,8 +10,8 @@ results/figures/
 checkpoints/
 wandb/
 
-# 참고자료 중 대용량 중첩 git 저장소 (9GB, referecne_files/*.pdf만 포함)
-referecne_files/Unsupervised-Context-Embedding/
+# 참고자료 (개인 문서/대용량 중첩 git 저장소, 코드와 무관 - 레포에 불필요)
+referecne_files/
 
 # 세션 부산물
 *.ipynb_checkpoints/
