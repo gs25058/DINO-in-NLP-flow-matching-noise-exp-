@@ -3,6 +3,9 @@
 실행:
     source scripts/env.sh
     uv run python -m src.train --config configs/r1a.yaml [--max-steps 500] [--device cuda]
+
+Part B 진단 로깅(diag_*, dense_early_eval)은 전부 config의 train 블록 키로만 켜진다.
+키가 없으면 기존 config를 그대로 재실행한 것과 동일하게 동작한다.
 """
 import argparse
 import json
@@ -14,12 +17,14 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 import yaml
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
-from src.evaluate import effective_rank_metrics, sts_b_dev_spearman
+from src.diagnostics import active_prototype_count, tbin_index
+from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_spearman
 from src.loss import DINOLoss, batch_kl_diagnostic, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
@@ -160,6 +165,26 @@ def _run(cfg, device, max_steps, logger) -> None:
     eval_every = cfg["eval"]["every_steps"]
     n_pairs = cfg["eval"]["batch_kl_pairs"]
 
+    # --- Part B 진단 플래그 (전부 기본 off) ---
+    diag_grad_norms = cfg["train"].get("diag_grad_norms", False)
+    diag_tbin_kl = cfg["train"].get("diag_tbin_kl", False)
+    diag_teacher_eval = cfg["train"].get("diag_teacher_eval", False)
+    diag_confidence = cfg["train"].get("diag_confidence", False)
+    diag_drift = cfg["train"].get("diag_drift", False)
+    dense_early_eval = cfg["train"].get("dense_early_eval", False)
+
+    n_tbins = 5
+    tbin_sums = [0.0] * n_tbins
+    tbin_counts = [0] * n_tbins
+
+    drift_sentences = None
+    prev_drift_embeds = None
+    if diag_drift:
+        drift_rng = random.Random(0)
+        n_sub = min(512, len(rank_eval_sentences))
+        drift_idx = drift_rng.sample(range(len(rank_eval_sentences)), n_sub)
+        drift_sentences = [rank_eval_sentences[i] for i in drift_idx]
+
     student.train()
     for step in range(max_steps):
         batch_sentences = random.sample(sentences, batch_size)
@@ -198,8 +223,30 @@ def _run(cfg, device, max_steps, logger) -> None:
             total_loss = total_loss + cfg["loss"]["velocity_lambda"] * l_vel
             aux["L_vel"] = l_vel.detach()
 
+        if diag_tbin_kl:
+            for k, t_k in enumerate(views.t_students):
+                kl_k = aux["kl_per_view"][k].item()
+                for t_val in t_k.tolist():
+                    b = tbin_index(t_val)
+                    tbin_sums[b] += kl_k
+                    tbin_counts[b] += 1
+
         optimizer.zero_grad()
         total_loss.backward()
+
+        grad_norm_log = {}
+        if diag_grad_norms:
+            # max_norm=1e10 -> 사실상 clip 없이 그룹별 norm만 측정 (진단용)
+            grad_norm_log["diag_grad_norm_backbone"] = torch.nn.utils.clip_grad_norm_(
+                list(student.backbone.parameters()), max_norm=1e10
+            ).item()
+            grad_norm_log["diag_grad_norm_bottleneck"] = torch.nn.utils.clip_grad_norm_(
+                list(student.head.mlp.parameters()), max_norm=1e10
+            ).item()
+            grad_norm_log["diag_grad_norm_prototype"] = torch.nn.utils.clip_grad_norm_(
+                list(student.head.expand.parameters()), max_norm=1e10
+            ).item()
+
         optimizer.step()
         scheduler.step()
         if momentum_start is not None:
@@ -222,19 +269,53 @@ def _run(cfg, device, max_steps, logger) -> None:
                 log["teacher_temp"] = teacher_temp
             if momentum_start is not None:
                 log["teacher_momentum"] = teacher.momentum
+            log.update(grad_norm_log)
+
+            if diag_tbin_kl:
+                for b in range(n_tbins):
+                    if tbin_counts[b] > 0:
+                        log[f"diag_tbin_kl_{b}"] = tbin_sums[b] / tbin_counts[b]
+                    tbin_sums[b] = 0.0
+                    tbin_counts[b] = 0
+
+            if diag_confidence:
+                with torch.no_grad():
+                    log["diag_confidence_max_p"] = aux["p_t"].max(dim=-1).values.mean().item()
+                    log["diag_active_prototypes"] = active_prototype_count(aux["p_bar_t"])
+
             wandb.log(log, step=step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
-        if step % eval_every == 0 or step == max_steps - 1:
+        do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
+        if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
             sts = sts_b_dev_spearman(student, tokenizer, device)
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
-            student.train()
-            wandb.log({"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}, step=step)
-            logger.info(f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}")
+            eval_log = {"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}
+            eval_msg = f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}"
+
+            if diag_teacher_eval:
+                teacher_sts = sts_b_dev_spearman(teacher.model, tokenizer, device)
+                eval_log["diag_teacher_sts_b_dev"] = teacher_sts
+                eval_msg += f" teacher_sts_b_dev={teacher_sts:.4f}"
+
+            if diag_drift:
+                cur_drift_embeds = embed_sentences(student, tokenizer, drift_sentences, device)
+                if prev_drift_embeds is not None:
+                    drift_cos = F.cosine_similarity(cur_drift_embeds, prev_drift_embeds, dim=-1).mean().item()
+                    eval_log["diag_drift_cosine"] = drift_cos
+                    eval_msg += f" drift_cosine={drift_cos:.4f}"
+                prev_drift_embeds = cur_drift_embeds
+
+            wandb.log(eval_log, step=step)
+            logger.info(eval_msg)
 
     ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(student.state_dict(), ckpt_path)
+    torch.save({
+        "state_dict": student.state_dict(),
+        "model_cfg": cfg["model"],
+        "teacher_state_dict": teacher.model.state_dict(),
+    }, ckpt_path)
     logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 
     wandb.finish()

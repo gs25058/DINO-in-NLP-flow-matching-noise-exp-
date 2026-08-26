@@ -66,7 +66,14 @@ class DINOLoss(nn.Module):
         if update_center:
             self._update_center(teacher_logits)
 
-        aux = {"H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps, "H_p_bar_t": h_p_bar_t.detach()}
+        # per-view KL(뷰별 t와 짝지어 로깅용, Part B diag_tbin_kl) + p_t/p_bar_t(diag_confidence용).
+        # 기본 학습 경로에서는 소비하지 않음 - 존재해도 동작에 영향 없음.
+        kl_per_view = [(ce.detach() - h_pt.detach()) for ce in ce_list]
+
+        aux = {
+            "H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps, "H_p_bar_t": h_p_bar_t.detach(),
+            "kl_per_view": kl_per_view, "p_t": p_t.detach(), "p_bar_t": p_bar_t.detach(),
+        }
         return loss, aux
 
 
