@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
@@ -111,18 +112,21 @@ def main():
     max_steps = cfg["train"]["max_steps"]
 
     logger = setup_logger(cfg["run_name"])
+    tb_writer = SummaryWriter(log_dir=str(ROOT / "results" / "tensorboard" / cfg["run_name"]))
 
     os.environ.setdefault("WANDB_MODE", cfg["logging"].get("wandb_mode", "offline"))
     wandb.init(project="flowdino-text", name=cfg["run_name"], config=cfg)
 
     try:
-        _run(cfg, device, max_steps, logger)
+        _run(cfg, device, max_steps, logger, tb_writer)
     except Exception:
         logger.exception("training crashed")
         raise
+    finally:
+        tb_writer.close()
 
 
-def _run(cfg, device, max_steps, logger) -> None:
+def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
     sentences = load_sentences(ROOT / cfg["data"]["sentences_path"])
     rank_eval_sentences = load_sentences(ROOT / cfg["data"]["rank_eval_path"])
@@ -290,6 +294,8 @@ def _run(cfg, device, max_steps, logger) -> None:
                     log["diag_active_prototypes"] = active_prototype_count(aux["p_bar_t"])
 
             wandb.log(log, step=step)
+            for k, v in log.items():
+                tb_writer.add_scalar(f"train/{k}", v, step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
@@ -319,6 +325,8 @@ def _run(cfg, device, max_steps, logger) -> None:
                 prev_drift_embeds = cur_drift_embeds
 
             wandb.log(eval_log, step=step)
+            for k, v in eval_log.items():
+                tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
 
     ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
