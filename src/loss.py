@@ -108,6 +108,40 @@ class DINOLoss(nn.Module):
         return loss, aux
 
 
+class EmbedUniformPush(nn.Module):
+    """teacher 쪽 mean-pooled embedding(BERT 통과 직후, DINO head 이전)에 직접 가하는
+    uniformity push. centering="uniform_push"(DINOLoss, logit 공간 8192차원, marginal
+    usage entropy 기준)와 같은 구조를 embedding 공간(hidden_size차원, Wang & Isola
+    uniformity 기준 - evaluate.py의 _uniformity와 동일 정의: log E[exp(-2||x-y||^2)])으로
+    옮긴 실험 변형 (팀원 요청, centering-uniform-push 브랜치, R5 구조와 결합해 임시 비교).
+
+    매 스텝: 이번 스텝 teacher embedding(push 반영分 포함, detached)으로 uniformity loss의
+    push 방향 gradient를 구해 persistent 벡터를 한 스텝 갱신 -> 다음 스텝 teacher forward의
+    mean-pooled 출력에 더해진다(model.py DinoTextModel.forward embed_push 인자).
+    lr<=0이면 항상 zero-vector - model.forward에 전달돼도 항등(no-op).
+    """
+
+    def __init__(self, embed_dim: int, lr: float):
+        super().__init__()
+        self.lr = lr
+        self.register_buffer("push", torch.zeros(embed_dim))
+
+    def step(self, teacher_embedding: torch.Tensor) -> float:
+        if self.lr <= 0:
+            return 0.0
+        e = self.push.detach().clone().requires_grad_(True)
+        shifted = F.normalize(teacher_embedding.detach() + e, p=2, dim=-1)
+        d2 = torch.cdist(shifted, shifted, p=2).pow(2)
+        n = shifted.shape[0]
+        off_diag = ~torch.eye(n, dtype=torch.bool, device=shifted.device)
+        # evaluate.py _uniformity와 동일 정의(log E[exp(-2||x-y||^2)]), 배치 내 모든 off-diag 쌍 사용.
+        unif_loss = torch.log(torch.exp(-2 * d2[off_diag]).mean().clamp_min(1e-12))
+        (grad,) = torch.autograd.grad(unif_loss, e)
+        with torch.no_grad():
+            self.push -= self.lr * grad
+        return grad.norm().item()
+
+
 def batch_kl_diagnostic(
     student_logits: list[torch.Tensor], student_temp: float, n_pairs: int = 256
 ) -> torch.Tensor:

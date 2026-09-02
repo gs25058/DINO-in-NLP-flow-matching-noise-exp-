@@ -27,7 +27,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
-from src.loss import DINOLoss, batch_kl_diagnostic, velocity_loss
+from src.loss import DINOLoss, EmbedUniformPush, batch_kl_diagnostic, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
 
@@ -147,6 +147,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         centering=cfg["loss"].get("centering", "ema"),
         uniform_push_lr=cfg["loss"].get("uniform_push_lr", 0.0),
     ).to(device)
+    embed_push_lr = cfg["loss"].get("embed_push_lr", 0.0)
+    embed_uniform_push = EmbedUniformPush(student.backbone.config.hidden_size, embed_push_lr).to(device)
 
     velocity_head = None
     if cfg["loss"]["velocity_head"]:
@@ -218,7 +220,11 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         views = aug(token_embeds, special_mask, step)
 
         with torch.no_grad():
-            _, t_logits, _ = teacher(inputs_embeds=views.teacher_embeds, attention_mask=attention_mask)
+            t_embedding, t_logits, _ = teacher(
+                inputs_embeds=views.teacher_embeds, attention_mask=attention_mask,
+                embed_push=embed_uniform_push.push,
+            )
+        embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
         vel_losses = []
@@ -280,6 +286,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 log["L_vel"] = aux["L_vel"].item()
             if "push_grad_norm" in aux:
                 log["push_grad_norm"] = aux["push_grad_norm"]
+            if embed_push_lr > 0:
+                log["embed_push_grad_norm"] = embed_push_grad_norm
             if warmup_teacher_temp is not None:
                 log["teacher_temp"] = teacher_temp
             if momentum_start is not None:

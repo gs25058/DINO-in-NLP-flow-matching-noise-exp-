@@ -68,9 +68,15 @@ class DinoTextModel(nn.Module):
     def get_input_embeddings(self) -> nn.Module:
         return self.backbone.get_input_embeddings()
 
-    def forward(self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor):
+    def forward(self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor,
+                embed_push: torch.Tensor | None = None):
+        """embed_push: teacher 쪽 mean-pooled embedding에 더하는 uniformity push 벡터
+        (centering-uniform-push 브랜치, embed_uniform_push_lr 실험용). None이면(기본) 기존과
+        완전히 동일 - 기존 config 재현성 유지."""
         hidden = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
         pooled = masked_mean_pool(hidden, attention_mask)
+        if embed_push is not None:
+            pooled = pooled + embed_push
         embedding = F.normalize(pooled, p=2, dim=-1)  # Final Embedding (평가/rank 지표)
         logits = self.head(pooled)                     # DINO loss 전용
         return embedding, logits, hidden                # hidden: velocity head(§4.2, R4)용 토큰별 출력
