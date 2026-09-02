@@ -51,6 +51,20 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "loss.teacher_temp_warmup_frac": ("float", {"low": 0.1, "high": 0.5}),
         "train.momentum_end": ("float", {"low": 0.998, "high": 0.9999}),
     },
+    # KoLeo(loss.koleo_lambda)와 lrsplit 안정화 축(train.lr/head_lr/grad_clip)이 각각 단독
+    # 효과가 거의 그대로 누적되는 것을 수동 grid(r6_bert_koleo_lrsplit_a/b/c, lr=2e-4 고정)
+    # 에서 확인했다 - 이 4개를 joint로 탐색해 개별 최적점의 조합이 grid의 최고값(raw
+    # STS-B dev 0.666, koleo_lambda=0.2 + lr=2e-4)을 넘는지 확인한다.
+    # base config는 configs/r5d_bert_lrsplit_c.yaml 권장 (exclude_ln_bias_wd=true 등
+    # lrsplit 안정화 구조가 이미 갖춰져 있고, train.lr/head_lr/grad_clip은 아래 탐색값으로
+    # 덮어써진다). train.lr 상한(5.4e-4)은 Table 1 원값 - BERT에서 이 값은 lrsplit
+    # 안정화 스택 없이는 붕괴했었다(r5d_bert_lrsplit_c까지의 안정화 축 참고).
+    "koleo_lrsplit": {
+        "loss.koleo_lambda": ("float", {"low": 0.01, "high": 0.5, "log": True}),
+        "train.lr": ("float", {"low": 3.0e-5, "high": 5.4e-4, "log": True}),
+        "train.head_lr": ("float", {"low": 1.0e-4, "high": 1.0e-3, "log": True}),
+        "train.grad_clip": ("float", {"low": 1.0, "high": 6.0}),
+    },
 }
 
 
@@ -101,8 +115,11 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
             raise ValueError(f"unknown suggest kind: {kind}")
         set_by_path(cfg, dotted, value)
 
-    cfg["run_name"] = f"{base_cfg['run_name']}_optuna_t{trial.number}"
+    # study_name(base config stem + search space)을 그대로 재사용한다 - base_cfg['run_name']만
+    # 쓰면 어떤 search space를 탐색 중인지(예: koleo_lambda)가 trial 이름에서 사라진다.
+    cfg["run_name"] = f"{study_name}_t{trial.number}"
     cfg["train"]["max_steps"] = max_steps
+    cfg["train"]["save_checkpoint"] = False  # trial 결과는 train.log의 sts_b_dev만으로 충분 - .pt는 아무도 안 읽음
     cfg["seed"] = seed
     # train.py가 학습 종료 시 TensorBoard HPARAMS 탭에 이 trial을 기록하도록 전달한다.
     cfg["_optuna"] = {"study_name": study_name, "trial_number": trial.number, "params": dict(trial.params)}

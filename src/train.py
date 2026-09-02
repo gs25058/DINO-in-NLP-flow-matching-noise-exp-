@@ -410,14 +410,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
 
-    ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "state_dict": student.state_dict(),
-        "model_cfg": cfg["model"],
-        "teacher_state_dict": teacher.model.state_dict(),
-    }, ckpt_path)
-    logger.info(f"[train] saved checkpoint -> {ckpt_path}")
+    if cfg["train"].get("save_checkpoint", True):
+        ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            "state_dict": student.state_dict(),
+            "model_cfg": cfg["model"],
+            "teacher_state_dict": teacher.model.state_dict(),
+        }, ckpt_path)
+        logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 
     opt = cfg.get("_optuna")
     if opt:

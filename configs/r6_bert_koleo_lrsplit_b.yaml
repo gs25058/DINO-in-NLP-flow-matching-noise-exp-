@@ -1,0 +1,8 @@
+# r6_bert_koleo_lrsplit_a와 동일, koleo_lambda=0.1 (중간 강도, 기존 BERT koleo 비교에서
+# 0.05보다 근소 우세했던 강도)
+extends: r5d_bert_lrsplit_c.yaml
+
+run_name: r6_bert_koleo_lrsplit_b
+
+loss:
+  koleo_lambda: 0.1
