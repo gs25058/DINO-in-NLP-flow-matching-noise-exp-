@@ -88,7 +88,7 @@ class GpuPool:
 
 
 def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: int,
-              seed: int, gpu_pool: GpuPool, timeout: int) -> float:
+              seed: int, gpu_pool: GpuPool, timeout: int, study_name: str) -> float:
     cfg = copy.deepcopy(base_cfg)
     for dotted, (kind, kwargs) in SEARCH_SPACES[space_name].items():
         if kind == "float":
@@ -104,6 +104,8 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
     cfg["run_name"] = f"{base_cfg['run_name']}_optuna_t{trial.number}"
     cfg["train"]["max_steps"] = max_steps
     cfg["seed"] = seed
+    # train.py가 학습 종료 시 TensorBoard HPARAMS 탭에 이 trial을 기록하도록 전달한다.
+    cfg["_optuna"] = {"study_name": study_name, "trial_number": trial.number, "params": dict(trial.params)}
 
     tmp_path = None
     gpu_id = gpu_pool.acquire()
@@ -161,7 +163,9 @@ def main():
     )
 
     study.optimize(
-        lambda trial: run_trial(trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout),
+        lambda trial: run_trial(
+            trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout, study_name
+        ),
         n_trials=args.n_trials, n_jobs=args.n_jobs,
     )
 

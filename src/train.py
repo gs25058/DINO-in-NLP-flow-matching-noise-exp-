@@ -13,6 +13,7 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -112,7 +113,11 @@ def main():
     max_steps = cfg["train"]["max_steps"]
 
     logger = setup_logger(cfg["run_name"])
-    tb_writer = SummaryWriter(log_dir=str(ROOT / "results" / "tensorboard" / cfg["run_name"]))
+    # run_name 아래 실행 시각 하위 폴더에 기록한다: 같은 run_name을 재실행해도 TensorBoard
+    # run 선택기에서 run_name이 그룹으로 묶이고, 각 실행이 시각으로 구분된 별도 run으로 보인다
+    # (이전에는 같은 폴더에 이벤트 파일이 누적되어 step이 뒤섞이고 실행 시각도 알 수 없었다).
+    run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tb_writer = SummaryWriter(log_dir=str(ROOT / "results" / "tensorboard" / cfg["run_name"] / run_ts))
 
     os.environ.setdefault("WANDB_MODE", cfg["logging"].get("wandb_mode", "offline"))
     wandb.init(project="flowdino-text", name=cfg["run_name"], config=cfg)
@@ -337,6 +342,16 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         "teacher_state_dict": teacher.model.state_dict(),
     }, ckpt_path)
     logger.info(f"[train] saved checkpoint -> {ckpt_path}")
+
+    opt = cfg.get("_optuna")
+    if opt:
+        # HPARAMS 탭에서 study 전체 trial을 한 표/평행좌표로 비교할 수 있게 로깅한다.
+        # `uv run tensorboard --logdir results/tensorboard`의 HPARAMS 탭이 하위 폴더를
+        # 재귀적으로 스캔하므로 tune.py가 도는 study의 모든 trial이 한 곳에 모인다.
+        tb_writer.add_hparams(
+            {"study": opt["study_name"], "trial_number": opt["trial_number"], **opt["params"]},
+            {"hparam/sts_b_dev": sts, "hparam/effective_rank": eff_rank, "hparam/uniformity": uniformity},
+        )
 
     wandb.finish()
 
