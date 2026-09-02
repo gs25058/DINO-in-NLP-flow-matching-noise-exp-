@@ -78,6 +78,54 @@ def load_sentences(path) -> list[str]:
     return sentences
 
 
+def _is_no_decay_param(name: str) -> bool:
+    """bias 또는 정규화 레이어(LayerNorm/norm) 파라미터인지, 이름 기반으로 판정.
+    BERT는 "LayerNorm.weight"/"...bias", ModernBERT는 bias 없이 "norm.weight"만 씀
+    (직접 확인, 두 backbone 모두 소문자화 후 "norm"/"bias" 부분 문자열 검사로 커버)."""
+    lname = name.lower()
+    return "bias" in lname or "norm" in lname
+
+
+def build_param_groups(
+    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool
+) -> list[dict]:
+    """backbone/head(+velocity_head) x decay/no-decay 4-way(또는 그 이하) param group 구성.
+
+    head_lr==lr 이고 exclude_ln_bias_wd=False 이면(둘 다 신규 키 미지정 시 기본값) 단일
+    그룹으로 접혀 기존 `AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)`와
+    파라미터 집합·순서·하이퍼파라미터가 완전히 동일 - 기존 config 재현성 보존."""
+    backbone_named = list(student.backbone.named_parameters())
+    head_named = list(student.head.named_parameters())
+    if velocity_head is not None:
+        head_named += list(velocity_head.named_parameters())
+
+    if not exclude_ln_bias_wd and head_lr == lr:
+        all_params = [p for _, p in backbone_named + head_named]
+        return [{"params": all_params, "lr": lr, "weight_decay": weight_decay}]
+
+    def split(named):
+        decay = [p for n, p in named if not _is_no_decay_param(n)]
+        no_decay = [p for n, p in named if _is_no_decay_param(n)]
+        return decay, no_decay
+
+    bb_decay, bb_no_decay = split(backbone_named)
+    hd_decay, hd_no_decay = split(head_named)
+
+    if exclude_ln_bias_wd:
+        groups = [
+            {"params": bb_decay, "lr": lr, "weight_decay": weight_decay},
+            {"params": bb_no_decay, "lr": lr, "weight_decay": 0.0},
+            {"params": hd_decay, "lr": head_lr, "weight_decay": weight_decay},
+            {"params": hd_no_decay, "lr": head_lr, "weight_decay": 0.0},
+        ]
+    else:
+        groups = [
+            {"params": bb_decay + bb_no_decay, "lr": lr, "weight_decay": weight_decay},
+            {"params": hd_decay + hd_no_decay, "lr": head_lr, "weight_decay": weight_decay},
+        ]
+    return [g for g in groups if len(g["params"]) > 0]
+
+
 def build_augment(cfg: dict) -> FlowNoiseAug:
     stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], weights_only=True)
     a = cfg["augment"]
@@ -157,10 +205,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         ).to(device)
 
-    params = list(student.parameters())
-    if velocity_head is not None:
-        params += list(velocity_head.parameters())
-    optimizer = torch.optim.AdamW(params, lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
+    head_lr = cfg["train"].get("head_lr", cfg["train"]["lr"])
+    exclude_ln_bias_wd = cfg["train"].get("exclude_ln_bias_wd", False)
+    grad_clip = cfg["train"].get("grad_clip")
+    param_groups = build_param_groups(
+        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd
+    )
+    optimizer = torch.optim.AdamW(param_groups)
+    all_trainable_params = [p for g in param_groups for p in g["params"]]
     warmup_steps = max(1, int(cfg["train"]["warmup_frac"] * max_steps))
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps)
 
@@ -264,6 +316,11 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             ).item()
             grad_norm_log["diag_grad_norm_prototype"] = torch.nn.utils.clip_grad_norm_(
                 list(student.head.expand.parameters()), max_norm=1e10
+            ).item()
+
+        if grad_clip is not None:
+            grad_norm_log["grad_norm_total"] = torch.nn.utils.clip_grad_norm_(
+                all_trainable_params, max_norm=grad_clip
             ).item()
 
         optimizer.step()
