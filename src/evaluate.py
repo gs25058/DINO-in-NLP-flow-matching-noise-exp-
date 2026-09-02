@@ -5,6 +5,7 @@ results/summary.md)가 이 모듈을 쓴다.
 """
 import argparse
 import json
+import random
 from pathlib import Path
 
 import torch
@@ -18,6 +19,7 @@ from sklearn.model_selection import train_test_split
 from transformers import AutoTokenizer
 
 ROOT = Path(__file__).resolve().parent.parent
+_STSB_DEV_CACHE = None  # (s1, s2, scores) - 프로세스당 1회만 다운로드/로드
 
 # METHOD.md §5: SimCSE 논문과 동일한 7-task. mteb 태스크명 -> HF dataset(모두 mteb/*-sts,
 # sentence1/sentence2/score 스키마, split="test")로 매핑 확인 완료 (mteb.get_task(...).metadata).
@@ -51,16 +53,53 @@ def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_leng
     return torch.cat(embeds, dim=0)
 
 
-def sts_b_dev_spearman(model, tokenizer, device, batch_size=64, max_length=128) -> float:
-    """학습 중 빠른 추적용. STS-B dev(validation) split, Spearman."""
-    ds = load_dataset("sentence-transformers/stsb", split="validation")
-    s1, s2, scores = list(ds["sentence1"]), list(ds["sentence2"]), list(ds["score"])
+def _load_stsb_dev():
+    global _STSB_DEV_CACHE
+    if _STSB_DEV_CACHE is None:
+        ds = load_dataset("sentence-transformers/stsb", split="validation")
+        _STSB_DEV_CACHE = (list(ds["sentence1"]), list(ds["sentence2"]), list(ds["score"]))
+    return _STSB_DEV_CACHE
 
+
+def _uniformity(embeds: torch.Tensor, seed: int = 0, n_pairs: int = 500) -> float:
+    """Wang & Isola (2020) uniformity: log E[exp(-2||f(x)-f(y)||^2)], 고정 시드 무작위 쌍."""
+    rng = random.Random(seed)
+    n = embeds.shape[0]
+    idx_i = [rng.randrange(n) for _ in range(n_pairs)]
+    idx_j = [rng.randrange(n) for _ in range(n_pairs)]
+    d2 = ((embeds[idx_i] - embeds[idx_j]) ** 2).sum(dim=-1)
+    return torch.log(torch.exp(-2 * d2).mean().clamp_min(1e-12)).item()
+
+
+def sts_b_dev_metrics(model, tokenizer, device, batch_size=64, max_length=128, align_seed=0):
+    """학습 중 매 평가마다 호출. STS-B dev(validation) 한 번의 인코딩으로:
+    - spearman: 학습 중 빠른 추적용 주 성능 지표
+    - alignment/uniformity: SimCSE 논문 Fig.2/각주3과 동일 정의
+      (ppos = score>=4.0[정규화 스케일 0.8] STS-B dev 쌍, pdata = STS-B dev 전체 문장 풀)
+    반환: (spearman, alignment, uniformity)
+    """
+    s1, s2, scores = _load_stsb_dev()
     e1 = embed_sentences(model, tokenizer, s1, device, batch_size, max_length)
     e2 = embed_sentences(model, tokenizer, s2, device, batch_size, max_length)
+
     cos = F.cosine_similarity(e1, e2, dim=-1).numpy()
-    corr, _ = spearmanr(cos, scores)
-    return float(corr)
+    spearman = float(spearmanr(cos, scores)[0])
+
+    scores_t = torch.tensor(scores)
+    pos_mask = scores_t >= 0.8  # sentence-transformers/stsb는 [0,5]->[0,1] 정규화 (원 기준 >=4.0)
+    d2 = ((e1 - e2) ** 2).sum(dim=-1)
+    alignment = d2[pos_mask].mean().item() if pos_mask.any() else float("nan")
+
+    pool = torch.cat([e1, e2], dim=0)  # SimCSE 각주3: "all STS-B sentences"
+    uniformity = _uniformity(pool, seed=align_seed)
+
+    return spearman, alignment, uniformity
+
+
+def sts_b_dev_spearman(model, tokenizer, device, batch_size=64, max_length=128) -> float:
+    """학습 중 빠른 추적용. STS-B dev(validation) split, Spearman. (하위호환용 얇은 래퍼)"""
+    spearman, _, _ = sts_b_dev_metrics(model, tokenizer, device, batch_size, max_length)
+    return spearman
 
 
 def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, max_length=128):

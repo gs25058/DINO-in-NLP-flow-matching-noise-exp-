@@ -24,7 +24,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
-from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_spearman
+from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
 from src.loss import DINOLoss, batch_kl_diagnostic, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
@@ -288,14 +288,20 @@ def _run(cfg, device, max_steps, logger) -> None:
 
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
         if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
-            sts = sts_b_dev_spearman(student, tokenizer, device)
+            sts, alignment, uniformity = sts_b_dev_metrics(student, tokenizer, device)
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
-            eval_log = {"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}
-            eval_msg = f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}"
+            eval_log = {
+                "sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv,
+                "alignment": alignment, "uniformity": uniformity,
+            }
+            eval_msg = (
+                f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f} "
+                f"alignment={alignment:.4f} uniformity={uniformity:.4f}"
+            )
 
             if diag_teacher_eval:
                 teacher_sts = sts_b_dev_spearman(teacher.model, tokenizer, device)
-                eval_log["diag_teacher_sts_b_dev"] = teacher_sts
+                eval_log["teacher_sts_b_dev"] = teacher_sts
                 eval_msg += f" teacher_sts_b_dev={teacher_sts:.4f}"
 
             if diag_drift:
