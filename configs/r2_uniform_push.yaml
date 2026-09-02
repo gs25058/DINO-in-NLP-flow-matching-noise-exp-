@@ -1,0 +1,15 @@
+# r2_anchor_curriculum과 동일 설정 + centering만 uniform_push로 교체 (팀원 제안).
+# r2_diag(순수 EMA, 붕괴)와 직접 비교하기 위해 다른 하이퍼파라미터는 전부 고정.
+extends: r2_anchor_curriculum.yaml
+
+run_name: r2_uniform_push
+seed: 42
+
+loss:
+  teacher_temp: 0.082
+  student_temp: 0.151
+  center_momentum: 0.920
+  velocity_head: false
+  velocity_lambda: 0.05
+  centering: uniform_push
+  uniform_push_lr: 1.0

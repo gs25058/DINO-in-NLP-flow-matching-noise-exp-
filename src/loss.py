@@ -19,17 +19,42 @@ class DINOLoss(nn.Module):
         L = CE(p_t, p_s) = H(p_t) + KL(p_t || p_s)          (식 11, 12)
 
     K개 student 뷰가 있으면 CE를 뷰 평균한다.
+
+    centering="ema"(기본): 식 (6) 그대로.
+    centering="uniform_push": 식 (6) EMA 업데이트에 더해, marginal usage entropy
+    H(p_bar_t)를 높이는 방향(=KL(p_bar_t||uniform) 감소 방향)의 gradient를 center에
+    한 스텝 추가로 더한다 (팀원 제안, centering-uniform-push 브랜치). uniform_push_lr=0
+    이면 순수 EMA와 동일 - 기존 config 재현성 유지.
     """
 
-    def __init__(self, logit_dim: int, center_momentum: float):
+    def __init__(self, logit_dim: int, center_momentum: float,
+                 centering: str = "ema", uniform_push_lr: float = 0.0):
         super().__init__()
+        assert centering in ("ema", "uniform_push"), f"unknown centering: {centering}"
         self.center_momentum = center_momentum
+        self.centering = centering
+        self.uniform_push_lr = uniform_push_lr
         self.register_buffer("center", torch.zeros(logit_dim))
 
     @torch.no_grad()
-    def _update_center(self, teacher_logits: torch.Tensor) -> None:
+    def _update_center_ema(self, teacher_logits: torch.Tensor) -> None:
         batch_mean = teacher_logits.mean(dim=0)
         self.center.mul_(self.center_momentum).add_(batch_mean, alpha=1.0 - self.center_momentum)
+
+    def _update_center_uniform_push(self, teacher_logits: torch.Tensor, teacher_temp: float) -> float:
+        """식 (6) EMA 업데이트 + H(p_bar_t) 상승 방향 gradient step. push gradient norm 반환(로깅용)."""
+        self._update_center_ema(teacher_logits)
+        if self.uniform_push_lr <= 0:
+            return 0.0
+        c = self.center.detach().clone().requires_grad_(True)
+        centered = teacher_logits.detach() - c
+        p_t = F.softmax(centered / teacher_temp, dim=-1)
+        p_bar = p_t.mean(dim=0)
+        neg_entropy = (p_bar * torch.log(p_bar.clamp_min(1e-12))).sum()  # 최소화 = H(p_bar_t) 최대화
+        (grad,) = torch.autograd.grad(neg_entropy, c)
+        with torch.no_grad():
+            self.center -= self.uniform_push_lr * grad
+        return grad.norm().item()
 
     def forward(
         self,
@@ -63,8 +88,12 @@ class DINOLoss(nn.Module):
         loss = torch.stack(ce_list).mean()
         kl_pt_ps = loss.detach() - h_pt.detach()  # CE - H = KL(p_t||p_s)
 
+        push_grad_norm = None
         if update_center:
-            self._update_center(teacher_logits)
+            if self.centering == "uniform_push":
+                push_grad_norm = self._update_center_uniform_push(teacher_logits, teacher_temp)
+            else:
+                self._update_center_ema(teacher_logits)
 
         # per-view KL(뷰별 t와 짝지어 로깅용, Part B diag_tbin_kl) + p_t/p_bar_t(diag_confidence용).
         # 기본 학습 경로에서는 소비하지 않음 - 존재해도 동작에 영향 없음.
@@ -74,6 +103,8 @@ class DINOLoss(nn.Module):
             "H_pt": h_pt.detach(), "KL_pt_ps": kl_pt_ps, "H_p_bar_t": h_p_bar_t.detach(),
             "kl_per_view": kl_per_view, "p_t": p_t.detach(), "p_bar_t": p_bar_t.detach(),
         }
+        if push_grad_norm is not None:
+            aux["push_grad_norm"] = push_grad_norm
         return loss, aux
 
 

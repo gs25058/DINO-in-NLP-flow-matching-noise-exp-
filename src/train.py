@@ -133,7 +133,11 @@ def _run(cfg, device, max_steps, logger) -> None:
     teacher = EMATeacher(student, momentum=cfg["train"]["teacher_momentum"])
 
     aug = build_augment(cfg)
-    dino_loss = DINOLoss(cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"]).to(device)
+    dino_loss = DINOLoss(
+        cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"],
+        centering=cfg["loss"].get("centering", "ema"),
+        uniform_push_lr=cfg["loss"].get("uniform_push_lr", 0.0),
+    ).to(device)
 
     velocity_head = None
     if cfg["loss"]["velocity_head"]:
@@ -265,6 +269,8 @@ def _run(cfg, device, max_steps, logger) -> None:
             }
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if "push_grad_norm" in aux:
+                log["push_grad_norm"] = aux["push_grad_norm"]
             if warmup_teacher_temp is not None:
                 log["teacher_temp"] = teacher_temp
             if momentum_start is not None:

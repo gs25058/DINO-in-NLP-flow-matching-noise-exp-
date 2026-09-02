@@ -4,6 +4,45 @@ import torch
 from src.loss import DINOLoss, velocity_loss
 
 
+def test_uniform_push_increases_marginal_entropy():
+    torch.manual_seed(0)
+    B, logit_dim = 16, 32
+    logits = torch.randn(B, logit_dim)
+    logits[:, 0] += 6.0  # prototype 0을 인위적으로 과대표현시킴
+
+    loss_fn = DINOLoss(logit_dim=logit_dim, center_momentum=0.9,
+                        centering="uniform_push", uniform_push_lr=1.0)
+    _, aux_before = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5,
+                             update_center=False)
+    h_before = aux_before["H_p_bar_t"].item()
+
+    # center 업데이트(EMA + uniform push) 1회 실행
+    _, aux_push = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+    assert aux_push["push_grad_norm"] > 0.0
+
+    _, aux_after = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5,
+                            update_center=False)
+    h_after = aux_after["H_p_bar_t"].item()
+
+    assert h_after > h_before
+
+
+def test_uniform_push_zero_lr_matches_plain_ema():
+    """uniform_push_lr=0이면 centering='uniform_push'도 순수 EMA와 동일해야 함 (회귀 보존)."""
+    torch.manual_seed(1)
+    B, logit_dim = 8, 16
+    logits = torch.randn(B, logit_dim)
+
+    ema_loss = DINOLoss(logit_dim=logit_dim, center_momentum=0.9)
+    push_loss = DINOLoss(logit_dim=logit_dim, center_momentum=0.9,
+                          centering="uniform_push", uniform_push_lr=0.0)
+
+    ema_loss(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+    push_loss(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+
+    assert torch.allclose(ema_loss.center, push_loss.center)
+
+
 def test_kl_near_zero_when_teacher_equals_student():
     torch.manual_seed(0)
     B, logit_dim = 16, 32
