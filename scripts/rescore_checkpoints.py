@@ -176,51 +176,64 @@ def main():
         help="best (pooling,postprocess) 조합으로 7-task까지 추가 채점할 대표 run 이름들(콤마 구분). "
              "빈 문자열이면 7-task 추가 채점을 건너뜀 (STS-B dev 그리드만).",
     )
+    parser.add_argument(
+        "--skip-grid", action="store_true",
+        help="61개 체크포인트 전체 그리드를 다시 돌리지 않고 --best-pooling/--best-postprocess로 "
+             "지정한 조합으로 --best-combo-runs의 7-task만 채점(이미 grid를 돌려서 best combo를 "
+             "아는 경우 재실행 낭비 방지용).",
+    )
+    parser.add_argument("--best-pooling", choices=POOLINGS, default="first_last")
+    parser.add_argument("--best-postprocess", choices=POSTPROCESSES, default="center_pc2")
     args = parser.parse_args()
 
     tokenizer_cache: dict[str, AutoTokenizer] = {}
-    all_rows = []
-    run_dirs = sorted(p for p in CKPT_ROOT.iterdir() if p.is_dir())
-    for i, run_dir in enumerate(run_dirs):
-        ckpt_path = run_dir / f"{args.which}.pt"
-        if not ckpt_path.exists():
-            continue
-        try:
-            entities = load_checkpoint_entities(ckpt_path)
-        except Exception as e:
-            print(f"[rescore] {run_dir.name}: 로드 실패, 스킵 ({e})")
-            continue
 
-        for entity_name, state_dict, backbone, bdim, ldim in entities:
-            if backbone not in tokenizer_cache:
-                tokenizer_cache[backbone] = AutoTokenizer.from_pretrained(backbone)
-            tokenizer = tokenizer_cache[backbone]
+    if not args.skip_grid:
+        all_rows = []
+        run_dirs = sorted(p for p in CKPT_ROOT.iterdir() if p.is_dir())
+        for i, run_dir in enumerate(run_dirs):
+            ckpt_path = run_dir / f"{args.which}.pt"
+            if not ckpt_path.exists():
+                continue
+            try:
+                entities = load_checkpoint_entities(ckpt_path)
+            except Exception as e:
+                print(f"[rescore] {run_dir.name}: 로드 실패, 스킵 ({e})")
+                continue
 
-            model = DinoTextModel(backbone, bdim, ldim).to(args.device)
-            model.load_state_dict(state_dict)
-            model.eval()
+            for entity_name, state_dict, backbone, bdim, ldim in entities:
+                if backbone not in tokenizer_cache:
+                    tokenizer_cache[backbone] = AutoTokenizer.from_pretrained(backbone)
+                tokenizer = tokenizer_cache[backbone]
 
-            rows = score_entity_stsb(model, tokenizer, args.device)
-            for r in rows:
-                r.update(run=run_dir.name, backbone=backbone, entity=entity_name)
-            all_rows.extend(rows)
+                model = DinoTextModel(backbone, bdim, ldim).to(args.device)
+                model.load_state_dict(state_dict)
+                model.eval()
 
-            best_here = max(r["sts_b_dev"] for r in rows)
-            print(f"[rescore] ({i+1}/{len(run_dirs)}) {run_dir.name} [{entity_name}, {backbone}]: "
-                  f"best sts_b_dev over grid={best_here:.4f}")
+                rows = score_entity_stsb(model, tokenizer, args.device)
+                for r in rows:
+                    r.update(run=run_dir.name, backbone=backbone, entity=entity_name)
+                all_rows.extend(rows)
 
-            del model
-            torch.cuda.empty_cache()
+                best_here = max(r["sts_b_dev"] for r in rows)
+                print(f"[rescore] ({i+1}/{len(run_dirs)}) {run_dir.name} [{entity_name}, {backbone}]: "
+                      f"best sts_b_dev over grid={best_here:.4f}")
 
-    write_grid_md(all_rows, Path(args.out))
-    print(f"[rescore] wrote {args.out} ({len(all_rows)} rows)")
+                del model
+                torch.cuda.empty_cache()
 
-    best_combo, best_mean = pick_best_combo(all_rows)
-    print(f"[rescore] best (pooling, postprocess) by mean student STS-B dev: "
-          f"{best_combo} (mean={best_mean:.4f})")
+        write_grid_md(all_rows, Path(args.out))
+        print(f"[rescore] wrote {args.out} ({len(all_rows)} rows)")
+
+        best_pooling, best_pp = pick_best_combo(all_rows)[0]
+        print(f"[rescore] best (pooling, postprocess) by mean student STS-B dev: "
+              f"({best_pooling}, {best_pp})")
+    else:
+        best_pooling, best_pp = args.best_pooling, args.best_postprocess
+        print(f"[rescore] --skip-grid: 그리드 재계산 없이 지정된 조합 사용 -> "
+              f"pooling={best_pooling}, postprocess={best_pp}")
 
     if args.best_combo_runs:
-        best_pooling, best_pp = best_combo
         rep_runs = [r.strip() for r in args.best_combo_runs.split(",") if r.strip()]
         extra_lines = [
             "", f"## 7-task 평균 (best combo: pooling={best_pooling}, postprocess={best_pp})", "",
