@@ -160,6 +160,29 @@ def batch_kl_diagnostic(
     return ((kl_ij + kl_ji) / 2).mean()
 
 
+def koleo_loss(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """DINOv2 KoLeo(Kozachenko-Leonenko differential-entropy) 정규화 (r6_koleo 실험,
+    METHOD.md 밖 - 학습 중 loss가 평가 후처리(centering+PC 제거)의 일을 대신 하게 만드는
+    인과 확인용).
+
+    z: L2 정규화된 student pooled 임베딩 [B, D] (model.py DinoTextModel.forward의 첫 번째
+    반환값 embedding과 동일 공간 - head 출력 logits이 아님). 배치 내 각 샘플의 최근접
+    이웃까지의 거리 d_i를 키우는(=서로 밀어내는) 방향으로 gradient를 준다.
+
+    최근접 이웃 index는 no_grad로 코사인 유사도(이미 unit norm이므로 내적=코사인)의
+    최댓값으로 찾고(자기 자신은 대각선을 -1로 채워 제외), 실제 거리는 z를 통해 미분 가능한
+    L2 norm으로 다시 계산한다(DINOv2 원 구현과 동일 - index 선택 자체는 미분 대상이 아님).
+    eps는 중복/거의 중복인 문장(d_i≈0)에서 log 발산을 막는다.
+    """
+    with torch.no_grad():
+        dots = z @ z.t()
+        n = z.shape[0]
+        dots.view(-1)[:: n + 1].fill_(-1.0)  # 대각선(자기 자신) 제외
+        nn_idx = dots.argmax(dim=1)
+    distances = (z - z[nn_idx]).norm(p=2, dim=-1)
+    return -torch.log(distances + eps).mean()
+
+
 def velocity_loss(
     v_pred: torch.Tensor,
     eps: torch.Tensor,

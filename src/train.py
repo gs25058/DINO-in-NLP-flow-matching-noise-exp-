@@ -27,7 +27,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
-from src.loss import DINOLoss, EmbedUniformPush, batch_kl_diagnostic, velocity_loss
+from src.loss import DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
 
@@ -225,6 +225,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     momentum_start = cfg["train"].get("momentum_start")
     momentum_end = cfg["train"].get("momentum_end")
 
+    koleo_lambda = cfg["loss"].get("koleo_lambda", 0.0)
+
     student_temp = cfg["loss"]["student_temp"]
     max_tokens = cfg["data"]["max_tokens"]
     batch_size = cfg["train"]["batch_size"]
@@ -280,12 +282,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         student_logits = []
         vel_losses = []
+        koleo_losses = []
         for k, s_embeds in enumerate(views.student_embeds):
-            _, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            s_embedding, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
+            if koleo_lambda > 0:
+                koleo_losses.append(koleo_loss(s_embedding))
 
         loss, aux = dino_loss(t_logits, student_logits, teacher_temp, student_temp)
         total_loss = loss
@@ -293,6 +298,10 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             l_vel = torch.stack(vel_losses).mean()
             total_loss = total_loss + cfg["loss"]["velocity_lambda"] * l_vel
             aux["L_vel"] = l_vel.detach()
+        if koleo_lambda > 0:
+            l_koleo = torch.stack(koleo_losses).mean()
+            total_loss = total_loss + koleo_lambda * l_koleo
+            aux["L_koleo"] = l_koleo.detach()
 
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
@@ -341,6 +350,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             }
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if "L_koleo" in aux:
+                log["L_koleo"] = aux["L_koleo"].item()
             if "push_grad_norm" in aux:
                 log["push_grad_norm"] = aux["push_grad_norm"]
             if embed_push_lr > 0:
