@@ -15,6 +15,7 @@ dependencies = [
     "wandb>=0.19",
     "matplotlib>=3.9",
     "pytest>=8.0",
+    "optuna>=3.6",
 ]
 
 # 공용 서버 CUDA 드라이버에 맞게 인덱스 선택.
