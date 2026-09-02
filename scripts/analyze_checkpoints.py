@@ -26,7 +26,7 @@ import yaml
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from src.evaluate import embed_sentences
+from src.evaluate import _uniformity, embed_sentences
 from src.model import DinoTextModel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,17 +82,24 @@ def get_pretrained_reference(backbone: str, device: str) -> dict:
 
 def alignment_uniformity(e1: torch.Tensor, e2: torch.Tensor, scores: np.ndarray,
                           seed: int = SEED, n_pairs: int = N_ALIGN_UNIF_PAIRS):
+    """SimCSE 논문 Fig.2/각주3과 동일 정의 (src.evaluate.sts_b_dev_metrics와 동일 방법론).
+
+    버그 수정 이력: 초기 버전은 uniformity를 "같은 STS 쌍(e1[i],e2[i])"끼리만 계산해
+    사실상 alignment와 비슷한 값이 나오는 오류가 있었음(무작위 쌍이 아니었음). 이제
+    e1/e2를 합친 전체 pool에서 진짜 무작위 두 문장을 뽑아 계산한다(evaluate._uniformity).
+    """
     rng = random.Random(seed)
     idx = list(range(len(scores)))
     rng.shuffle(idx)
     idx = idx[:n_pairs]
     e1s, e2s, sc = e1[idx], e2[idx], scores[idx]
 
-    d2 = ((e1s - e2s) ** 2).sum(dim=-1)
-    uniformity = torch.log(torch.exp(-2 * d2).mean().clamp_min(1e-12)).item()
-
     pos_mask = sc >= 0.8  # sentence-transformers/stsb는 score를 [0,5]->[0,1]로 정규화 (원 기준 >=4.0)
+    d2 = ((e1s - e2s) ** 2).sum(dim=-1)
     alignment = d2[pos_mask].mean().item() if pos_mask.sum() > 0 else float("nan")
+
+    pool = torch.cat([e1, e2], dim=0)  # SimCSE 각주3: "all STS-B sentences" 전체 pool
+    uniformity = _uniformity(pool, seed=seed, n_pairs=n_pairs)
     return alignment, uniformity, idx
 
 
