@@ -88,6 +88,63 @@ def plot_run(name: str, d: dict, out_dir: Path) -> Path | None:
     return out_path
 
 
+def plot_align_uniform(name: str, d: dict, out_dir: Path) -> Path | None:
+    """SimCSE 논문 Fig.2 스타일: uniformity(x)-alignment(y) 궤적. 색 그라데이션 + 마지막 화살표로
+    학습 진행 방향을 표시한다 (둘 다 낮을수록 좋음, 왼쪽 아래로 향하는 게 이상적)."""
+    xs_u, uniformity = _series(d["eval"], "uniformity")
+    xs_a, alignment = _series(d["eval"], "alignment")
+    if not uniformity or not alignment:
+        return None
+    n = min(len(uniformity), len(alignment))
+    uniformity, alignment = uniformity[:n], alignment[:n]
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(uniformity, alignment, "-", color="gray", alpha=0.5, zorder=2)
+    sc = ax.scatter(uniformity, alignment, c=range(n), cmap="viridis", s=40, zorder=3)
+    if n >= 2:
+        ax.annotate(
+            "", xy=(uniformity[-1], alignment[-1]), xytext=(uniformity[-2], alignment[-2]),
+            arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5), zorder=4,
+        )
+    ax.set_xlabel("uniformity (lower = better)")
+    ax.set_ylabel("alignment (lower = better)")
+    ax.set_title(f"{name}\nalign-uniform trajectory (SimCSE Fig.2 style)")
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("eval index, normalized (0=start, 1=end; arrow marks direction)")
+    fig.tight_layout()
+    out_path = out_dir / f"align_uniform_{name}.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_align_uniform_comparison(all_data: dict, out_dir: Path) -> Path | None:
+    """SimCSE 논문 Fig.3 스타일: 여러 run의 최종 alignment/uniformity를 한 판에 비교."""
+    points = {}
+    for name, d in all_data.items():
+        _, uniformity = _series(d["eval"], "uniformity")
+        _, alignment = _series(d["eval"], "alignment")
+        _, sts = _series(d["eval"], "sts_b_dev")
+        if uniformity and alignment:
+            points[name] = (uniformity[-1], alignment[-1], sts[-1] if sts else None)
+    if not points:
+        return None
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+    for name, (u, a, s) in sorted(points.items()):
+        ax.scatter(u, a, s=50)
+        label = name if s is None else f"{name} ({s:.2f})"
+        ax.annotate(label, (u, a), fontsize=6)
+    ax.set_xlabel("uniformity (final, lower = better)")
+    ax.set_ylabel("alignment (final, lower = better)")
+    ax.set_title("Final alignment vs uniformity across runs (SimCSE Fig.3 style, label = STS-B dev)")
+    fig.tight_layout()
+    out_path = out_dir / "align_uniform_comparison.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
 def plot_comparison(all_data: dict, out_dir: Path, out_name: str = "comparison_sts_b_eff_rank.png",
                      title: str = "Cross-run comparison: STS-B dev / effective rank") -> Path | None:
     complete = {name: d for name, d in all_data.items() if d["eval"]}
@@ -140,9 +197,17 @@ def main():
         else:
             print(f"[plot_logs] {name}: step 로그 없음 (진행 중이거나 실패한 런) - 스킵")
 
+        align_path = plot_align_uniform(name, d, OUT_DIR)
+        if align_path:
+            written.append(align_path)
+
     cmp_path = plot_comparison(all_data, OUT_DIR)
     if cmp_path:
         written.append(cmp_path)
+
+    align_cmp_path = plot_align_uniform_comparison(all_data, OUT_DIR)
+    if align_cmp_path:
+        written.append(align_cmp_path)
 
     bert_data = {name: d for name, d in all_data.items() if "bert" in name}
     bert_cmp_path = plot_comparison(
