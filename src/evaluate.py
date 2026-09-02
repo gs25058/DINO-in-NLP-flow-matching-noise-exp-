@@ -35,8 +35,11 @@ STS_SUITE = {
 
 
 @torch.no_grad()
-def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_length=128):
-    """model: DinoTextModel (forward -> (embedding, logits, hidden)). Final Embedding만 반환."""
+def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_length=128, pooling="last"):
+    """model: DinoTextModel (forward -> (embedding, logits, hidden)). Final Embedding만 반환.
+
+    pooling: "last"(기본, 기존과 동일) | "first_last" (model.py DinoTextModel.forward 참고,
+    소급 재채점 scripts/rescore_checkpoints.py 전용 - 학습 경로는 이 인자를 넘기지 않는다)."""
     was_training = model.training
     model.eval()
     embeds = []
@@ -46,11 +49,40 @@ def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_leng
             batch, truncation=True, max_length=max_length, padding=True, return_tensors="pt"
         ).to(device)
         token_embeds = model.get_input_embeddings()(enc["input_ids"])
-        embedding, _, _ = model(inputs_embeds=token_embeds, attention_mask=enc["attention_mask"])
+        embedding, _, _ = model(
+            inputs_embeds=token_embeds, attention_mask=enc["attention_mask"], pooling=pooling
+        )
         embeds.append(embedding.cpu())
     if was_training:
         model.train()
     return torch.cat(embeds, dim=0)
+
+
+def postprocess_embeddings(
+    embeds: torch.Tensor, fit_embeds: torch.Tensor | None = None, method: str = "none"
+) -> torch.Tensor:
+    """평가 후처리(소급 재채점 전용, scripts/rescore_checkpoints.py). 학습에는 관여하지 않음.
+
+    method: "none"(기본, 항등) | "center"(fit_embeds 평균 제거 후 재정규화) |
+    "center_pc1"/"center_pc2"(center 후 fit_embeds에서 계산한 상위 K개 주성분 성분 추가 제거,
+    재정규화) - SIF/whitening-lite 관례대로 평균·주성분은 fit_embeds(평가 시 쓰는 문장 풀 자체)
+    에서 계산하고 외부 통계는 쓰지 않는다.
+    fit_embeds 생략 시 embeds 자신으로 fit(평가 대상 집합이 곧 통계 집합인 경우)."""
+    if method == "none":
+        return embeds
+    if fit_embeds is None:
+        fit_embeds = embeds
+    mean = fit_embeds.mean(dim=0, keepdim=True)
+    out = embeds - mean
+    if method in ("center_pc1", "center_pc2"):
+        fit_centered = fit_embeds - mean
+        _, _, vh = torch.linalg.svd(fit_centered.double(), full_matrices=False)
+        k = 1 if method == "center_pc1" else 2
+        components = vh[:k].to(out.dtype)  # [k, D], 이미 정규직교(orthonormal)
+        out = out - (out @ components.T) @ components
+    elif method != "center":
+        raise ValueError(f"unknown postprocess method: {method}")
+    return F.normalize(out, p=2, dim=-1)
 
 
 def _load_stsb_dev():

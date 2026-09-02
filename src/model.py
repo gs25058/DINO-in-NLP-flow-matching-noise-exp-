@@ -69,17 +69,31 @@ class DinoTextModel(nn.Module):
         return self.backbone.get_input_embeddings()
 
     def forward(self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor,
-                embed_push: torch.Tensor | None = None):
+                embed_push: torch.Tensor | None = None, pooling: str = "last"):
         """embed_push: teacher 쪽 mean-pooled embedding에 더하는 uniformity push 벡터
         (centering-uniform-push 브랜치, embed_uniform_push_lr 실험용). None이면(기본) 기존과
-        완전히 동일 - 기존 config 재현성 유지."""
-        hidden = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
-        pooled = masked_mean_pool(hidden, attention_mask)
+        완전히 동일 - 기존 config 재현성 유지.
+
+        pooling: "last"(기본, 기존과 동일) | "first_last" - 평가 전용 소급 재채점(evaluate.py)
+        용. 첫 층(embedding 출력)과 마지막 층 hidden state를 평균한 뒤 mean pooling(BERT-flow류
+        anisotropy 완화 트릭). 학습 루프는 이 인자를 넘기지 않으므로 항상 "last" - 재현성 유지."""
+        if pooling == "first_last":
+            out = self.backbone(
+                inputs_embeds=inputs_embeds, attention_mask=attention_mask, output_hidden_states=True
+            )
+            hidden = out.last_hidden_state
+            pool_input = (out.hidden_states[0] + out.hidden_states[-1]) / 2
+        elif pooling == "last":
+            hidden = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
+            pool_input = hidden
+        else:
+            raise ValueError(f"unknown pooling: {pooling}")
+        pooled = masked_mean_pool(pool_input, attention_mask)
         if embed_push is not None:
             pooled = pooled + embed_push
         embedding = F.normalize(pooled, p=2, dim=-1)  # Final Embedding (평가/rank 지표)
         logits = self.head(pooled)                     # DINO loss 전용
-        return embedding, logits, hidden                # hidden: velocity head(§4.2, R4)용 토큰별 출력
+        return embedding, logits, hidden                # hidden: velocity head(§4.2, R4)용 토큰별 출력(항상 last)
 
 
 class EMATeacher:
