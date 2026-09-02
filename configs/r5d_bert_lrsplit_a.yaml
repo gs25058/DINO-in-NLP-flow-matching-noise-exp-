@@ -1,0 +1,14 @@
+# r5d_bert(고정 t~U(0.35,0.5), K=3, teacher_temp 스케줄 0.082->0.11, momentum ramp
+# 0.997->0.9995 그대로) + head lr 분리(작업 1 신규 기능): backbone은 기존 3e-5 그대로 두고
+# head(DINO head)만 훨씬 큰 lr(5.4e-4, Table 1 원래 lr)로 별도 학습 + LN/bias wd 제외 +
+# grad clip. uniform_push 등 centering 변경은 쓰지 않음(순수 EMA) - head lr 분리 자체의
+# 효과만 분리해서 본다. a: backbone lr 3e-5(r5d_bert와 동일, 대조군에 가까움).
+extends: r5d_bert.yaml
+
+run_name: r5d_bert_lrsplit_a
+
+train:
+  lr: 3.0e-5
+  head_lr: 5.4e-4
+  exclude_ln_bias_wd: true
+  grad_clip: 3.0

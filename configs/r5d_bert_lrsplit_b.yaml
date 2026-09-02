@@ -1,0 +1,11 @@
+# r5d_bert_lrsplit_a와 동일하되 backbone lr만 1.0e-4로 올림(3.3배) - backbone lr에
+# 여지가 있는지(a와 비교) 확인.
+extends: r5d_bert.yaml
+
+run_name: r5d_bert_lrsplit_b
+
+train:
+  lr: 1.0e-4
+  head_lr: 5.4e-4
+  exclude_ln_bias_wd: true
+  grad_clip: 3.0
