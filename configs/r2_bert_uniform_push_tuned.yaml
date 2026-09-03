@@ -1,0 +1,11 @@
+# r2_bert_uniform_push.yaml과 동일한 베이스(안정화된 lr/warmup + uniform_push centering)에
+# tune_bert_uniform_push_wide Optuna study(16 trials, 750-step budget)의 최적 파라미터를
+# 적용한 풀 길이(1500 step) 확인 실행. best trial(#9, val sts_b_dev=0.6098)의 파라미터.
+extends: r2_bert_uniform_push.yaml
+
+run_name: r2_bert_uniform_push_tuned
+
+loss:
+  teacher_temp: 0.1393
+  center_momentum: 0.9887
+  uniform_push_lr: 4.083

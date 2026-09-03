@@ -3,6 +3,9 @@
 실행:
     source scripts/env.sh
     uv run python -m src.train --config configs/r1a.yaml [--max-steps 500] [--device cuda]
+
+Part B 진단 로깅(diag_*, dense_early_eval)은 전부 config의 train 블록 키로만 켜진다.
+키가 없으면 기존 config를 그대로 재실행한 것과 동일하게 동작한다.
 """
 import argparse
 import json
@@ -10,17 +13,21 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
-from src.evaluate import effective_rank_metrics, sts_b_dev_spearman
-from src.loss import DINOLoss, batch_kl_diagnostic, velocity_loss
+from src.diagnostics import active_prototype_count, tbin_index
+from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
+from src.loss import DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
 
@@ -71,6 +78,54 @@ def load_sentences(path) -> list[str]:
     return sentences
 
 
+def _is_no_decay_param(name: str) -> bool:
+    """bias 또는 정규화 레이어(LayerNorm/norm) 파라미터인지, 이름 기반으로 판정.
+    BERT는 "LayerNorm.weight"/"...bias", ModernBERT는 bias 없이 "norm.weight"만 씀
+    (직접 확인, 두 backbone 모두 소문자화 후 "norm"/"bias" 부분 문자열 검사로 커버)."""
+    lname = name.lower()
+    return "bias" in lname or "norm" in lname
+
+
+def build_param_groups(
+    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool
+) -> list[dict]:
+    """backbone/head(+velocity_head) x decay/no-decay 4-way(또는 그 이하) param group 구성.
+
+    head_lr==lr 이고 exclude_ln_bias_wd=False 이면(둘 다 신규 키 미지정 시 기본값) 단일
+    그룹으로 접혀 기존 `AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)`와
+    파라미터 집합·순서·하이퍼파라미터가 완전히 동일 - 기존 config 재현성 보존."""
+    backbone_named = list(student.backbone.named_parameters())
+    head_named = list(student.head.named_parameters())
+    if velocity_head is not None:
+        head_named += list(velocity_head.named_parameters())
+
+    if not exclude_ln_bias_wd and head_lr == lr:
+        all_params = [p for _, p in backbone_named + head_named]
+        return [{"params": all_params, "lr": lr, "weight_decay": weight_decay}]
+
+    def split(named):
+        decay = [p for n, p in named if not _is_no_decay_param(n)]
+        no_decay = [p for n, p in named if _is_no_decay_param(n)]
+        return decay, no_decay
+
+    bb_decay, bb_no_decay = split(backbone_named)
+    hd_decay, hd_no_decay = split(head_named)
+
+    if exclude_ln_bias_wd:
+        groups = [
+            {"params": bb_decay, "lr": lr, "weight_decay": weight_decay},
+            {"params": bb_no_decay, "lr": lr, "weight_decay": 0.0},
+            {"params": hd_decay, "lr": head_lr, "weight_decay": weight_decay},
+            {"params": hd_no_decay, "lr": head_lr, "weight_decay": 0.0},
+        ]
+    else:
+        groups = [
+            {"params": bb_decay + bb_no_decay, "lr": lr, "weight_decay": weight_decay},
+            {"params": hd_decay + hd_no_decay, "lr": head_lr, "weight_decay": weight_decay},
+        ]
+    return [g for g in groups if len(g["params"]) > 0]
+
+
 def build_augment(cfg: dict) -> FlowNoiseAug:
     stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], weights_only=True)
     a = cfg["augment"]
@@ -106,18 +161,25 @@ def main():
     max_steps = cfg["train"]["max_steps"]
 
     logger = setup_logger(cfg["run_name"])
+    # run_name 아래 실행 시각 하위 폴더에 기록한다: 같은 run_name을 재실행해도 TensorBoard
+    # run 선택기에서 run_name이 그룹으로 묶이고, 각 실행이 시각으로 구분된 별도 run으로 보인다
+    # (이전에는 같은 폴더에 이벤트 파일이 누적되어 step이 뒤섞이고 실행 시각도 알 수 없었다).
+    run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tb_writer = SummaryWriter(log_dir=str(ROOT / "results" / "tensorboard" / cfg["run_name"] / run_ts))
 
     os.environ.setdefault("WANDB_MODE", cfg["logging"].get("wandb_mode", "offline"))
     wandb.init(project="flowdino-text", name=cfg["run_name"], config=cfg)
 
     try:
-        _run(cfg, device, max_steps, logger)
+        _run(cfg, device, max_steps, logger, tb_writer)
     except Exception:
         logger.exception("training crashed")
         raise
+    finally:
+        tb_writer.close()
 
 
-def _run(cfg, device, max_steps, logger) -> None:
+def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
     sentences = load_sentences(ROOT / cfg["data"]["sentences_path"])
     rank_eval_sentences = load_sentences(ROOT / cfg["data"]["rank_eval_path"])
@@ -128,7 +190,13 @@ def _run(cfg, device, max_steps, logger) -> None:
     teacher = EMATeacher(student, momentum=cfg["train"]["teacher_momentum"])
 
     aug = build_augment(cfg)
-    dino_loss = DINOLoss(cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"]).to(device)
+    dino_loss = DINOLoss(
+        cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"],
+        centering=cfg["loss"].get("centering", "ema"),
+        uniform_push_lr=cfg["loss"].get("uniform_push_lr", 0.0),
+    ).to(device)
+    embed_push_lr = cfg["loss"].get("embed_push_lr", 0.0)
+    embed_uniform_push = EmbedUniformPush(student.backbone.config.hidden_size, embed_push_lr).to(device)
 
     velocity_head = None
     if cfg["loss"]["velocity_head"]:
@@ -137,10 +205,14 @@ def _run(cfg, device, max_steps, logger) -> None:
             nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         ).to(device)
 
-    params = list(student.parameters())
-    if velocity_head is not None:
-        params += list(velocity_head.parameters())
-    optimizer = torch.optim.AdamW(params, lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
+    head_lr = cfg["train"].get("head_lr", cfg["train"]["lr"])
+    exclude_ln_bias_wd = cfg["train"].get("exclude_ln_bias_wd", False)
+    grad_clip = cfg["train"].get("grad_clip")
+    param_groups = build_param_groups(
+        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd
+    )
+    optimizer = torch.optim.AdamW(param_groups)
+    all_trainable_params = [p for g in param_groups for p in g["params"]]
     warmup_steps = max(1, int(cfg["train"]["warmup_frac"] * max_steps))
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps)
 
@@ -153,12 +225,34 @@ def _run(cfg, device, max_steps, logger) -> None:
     momentum_start = cfg["train"].get("momentum_start")
     momentum_end = cfg["train"].get("momentum_end")
 
+    koleo_lambda = cfg["loss"].get("koleo_lambda", 0.0)
+
     student_temp = cfg["loss"]["student_temp"]
     max_tokens = cfg["data"]["max_tokens"]
     batch_size = cfg["train"]["batch_size"]
     log_every = cfg["eval"]["log_every_steps"]
     eval_every = cfg["eval"]["every_steps"]
     n_pairs = cfg["eval"]["batch_kl_pairs"]
+
+    # --- Part B 진단 플래그 (전부 기본 off) ---
+    diag_grad_norms = cfg["train"].get("diag_grad_norms", False)
+    diag_tbin_kl = cfg["train"].get("diag_tbin_kl", False)
+    diag_teacher_eval = cfg["train"].get("diag_teacher_eval", False)
+    diag_confidence = cfg["train"].get("diag_confidence", False)
+    diag_drift = cfg["train"].get("diag_drift", False)
+    dense_early_eval = cfg["train"].get("dense_early_eval", False)
+
+    n_tbins = 5
+    tbin_sums = [0.0] * n_tbins
+    tbin_counts = [0] * n_tbins
+
+    drift_sentences = None
+    prev_drift_embeds = None
+    if diag_drift:
+        drift_rng = random.Random(0)
+        n_sub = min(512, len(rank_eval_sentences))
+        drift_idx = drift_rng.sample(range(len(rank_eval_sentences)), n_sub)
+        drift_sentences = [rank_eval_sentences[i] for i in drift_idx]
 
     student.train()
     for step in range(max_steps):
@@ -180,16 +274,23 @@ def _run(cfg, device, max_steps, logger) -> None:
         views = aug(token_embeds, special_mask, step)
 
         with torch.no_grad():
-            _, t_logits, _ = teacher(inputs_embeds=views.teacher_embeds, attention_mask=attention_mask)
+            t_embedding, t_logits, _ = teacher(
+                inputs_embeds=views.teacher_embeds, attention_mask=attention_mask,
+                embed_push=embed_uniform_push.push,
+            )
+        embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
         vel_losses = []
+        koleo_losses = []
         for k, s_embeds in enumerate(views.student_embeds):
-            _, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            s_embedding, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
+            if koleo_lambda > 0:
+                koleo_losses.append(koleo_loss(s_embedding))
 
         loss, aux = dino_loss(t_logits, student_logits, teacher_temp, student_temp)
         total_loss = loss
@@ -197,9 +298,40 @@ def _run(cfg, device, max_steps, logger) -> None:
             l_vel = torch.stack(vel_losses).mean()
             total_loss = total_loss + cfg["loss"]["velocity_lambda"] * l_vel
             aux["L_vel"] = l_vel.detach()
+        if koleo_lambda > 0:
+            l_koleo = torch.stack(koleo_losses).mean()
+            total_loss = total_loss + koleo_lambda * l_koleo
+            aux["L_koleo"] = l_koleo.detach()
+
+        if diag_tbin_kl:
+            for k, t_k in enumerate(views.t_students):
+                kl_k = aux["kl_per_view"][k].item()
+                for t_val in t_k.tolist():
+                    b = tbin_index(t_val)
+                    tbin_sums[b] += kl_k
+                    tbin_counts[b] += 1
 
         optimizer.zero_grad()
         total_loss.backward()
+
+        grad_norm_log = {}
+        if diag_grad_norms:
+            # max_norm=1e10 -> 사실상 clip 없이 그룹별 norm만 측정 (진단용)
+            grad_norm_log["diag_grad_norm_backbone"] = torch.nn.utils.clip_grad_norm_(
+                list(student.backbone.parameters()), max_norm=1e10
+            ).item()
+            grad_norm_log["diag_grad_norm_bottleneck"] = torch.nn.utils.clip_grad_norm_(
+                list(student.head.mlp.parameters()), max_norm=1e10
+            ).item()
+            grad_norm_log["diag_grad_norm_prototype"] = torch.nn.utils.clip_grad_norm_(
+                list(student.head.expand.parameters()), max_norm=1e10
+            ).item()
+
+        if grad_clip is not None:
+            grad_norm_log["grad_norm_total"] = torch.nn.utils.clip_grad_norm_(
+                all_trainable_params, max_norm=grad_clip
+            ).item()
+
         optimizer.step()
         scheduler.step()
         if momentum_start is not None:
@@ -218,24 +350,85 @@ def _run(cfg, device, max_steps, logger) -> None:
             }
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if "L_koleo" in aux:
+                log["L_koleo"] = aux["L_koleo"].item()
+            if "push_grad_norm" in aux:
+                log["push_grad_norm"] = aux["push_grad_norm"]
+            if embed_push_lr > 0:
+                log["embed_push_grad_norm"] = embed_push_grad_norm
             if warmup_teacher_temp is not None:
                 log["teacher_temp"] = teacher_temp
             if momentum_start is not None:
                 log["teacher_momentum"] = teacher.momentum
+            log.update(grad_norm_log)
+
+            if diag_tbin_kl:
+                for b in range(n_tbins):
+                    if tbin_counts[b] > 0:
+                        log[f"diag_tbin_kl_{b}"] = tbin_sums[b] / tbin_counts[b]
+                    tbin_sums[b] = 0.0
+                    tbin_counts[b] = 0
+
+            if diag_confidence:
+                with torch.no_grad():
+                    log["diag_confidence_max_p"] = aux["p_t"].max(dim=-1).values.mean().item()
+                    log["diag_active_prototypes"] = active_prototype_count(aux["p_bar_t"])
+
             wandb.log(log, step=step)
+            for k, v in log.items():
+                tb_writer.add_scalar(f"train/{k}", v, step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
-        if step % eval_every == 0 or step == max_steps - 1:
-            sts = sts_b_dev_spearman(student, tokenizer, device)
+        do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
+        if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
+            sts, alignment, uniformity = sts_b_dev_metrics(student, tokenizer, device)
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
-            student.train()
-            wandb.log({"sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv}, step=step)
-            logger.info(f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f}")
+            eval_log = {
+                "sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv,
+                "alignment": alignment, "uniformity": uniformity,
+            }
+            eval_msg = (
+                f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f} "
+                f"alignment={alignment:.4f} uniformity={uniformity:.4f}"
+            )
 
-    ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(student.state_dict(), ckpt_path)
-    logger.info(f"[train] saved checkpoint -> {ckpt_path}")
+            if diag_teacher_eval:
+                teacher_sts = sts_b_dev_spearman(teacher.model, tokenizer, device)
+                eval_log["teacher_sts_b_dev"] = teacher_sts
+                eval_msg += f" teacher_sts_b_dev={teacher_sts:.4f}"
+
+            if diag_drift:
+                cur_drift_embeds = embed_sentences(student, tokenizer, drift_sentences, device)
+                if prev_drift_embeds is not None:
+                    drift_cos = F.cosine_similarity(cur_drift_embeds, prev_drift_embeds, dim=-1).mean().item()
+                    eval_log["diag_drift_cosine"] = drift_cos
+                    eval_msg += f" drift_cosine={drift_cos:.4f}"
+                prev_drift_embeds = cur_drift_embeds
+
+            wandb.log(eval_log, step=step)
+            for k, v in eval_log.items():
+                tb_writer.add_scalar(f"eval/{k}", v, step)
+            logger.info(eval_msg)
+
+    if cfg["train"].get("save_checkpoint", True):
+        ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            "state_dict": student.state_dict(),
+            "model_cfg": cfg["model"],
+            "teacher_state_dict": teacher.model.state_dict(),
+        }, ckpt_path)
+        logger.info(f"[train] saved checkpoint -> {ckpt_path}")
+
+    opt = cfg.get("_optuna")
+    if opt:
+        # HPARAMS 탭에서 study 전체 trial을 한 표/평행좌표로 비교할 수 있게 로깅한다.
+        # `uv run tensorboard --logdir results/tensorboard`의 HPARAMS 탭이 하위 폴더를
+        # 재귀적으로 스캔하므로 tune.py가 도는 study의 모든 trial이 한 곳에 모인다.
+        tb_writer.add_hparams(
+            {"study": opt["study_name"], "trial_number": opt["trial_number"], **opt["params"]},
+            {"hparam/sts_b_dev": sts, "hparam/effective_rank": eff_rank, "hparam/uniformity": uniformity},
+        )
 
     wandb.finish()
 

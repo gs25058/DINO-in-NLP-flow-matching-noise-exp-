@@ -1,7 +1,81 @@
 import pytest
 import torch
 
-from src.loss import DINOLoss, velocity_loss
+from src.loss import DINOLoss, EmbedUniformPush, velocity_loss
+
+
+def _uniformity(embeds: torch.Tensor) -> float:
+    """evaluate.py의 _uniformity와 동일 정의(전체 off-diag 쌍), 테스트 검증용."""
+    d2 = torch.cdist(embeds, embeds, p=2).pow(2)
+    n = embeds.shape[0]
+    off_diag = ~torch.eye(n, dtype=torch.bool)
+    return torch.log(torch.exp(-2 * d2[off_diag]).mean().clamp_min(1e-12)).item()
+
+
+def test_uniform_push_increases_marginal_entropy():
+    torch.manual_seed(0)
+    B, logit_dim = 16, 32
+    logits = torch.randn(B, logit_dim)
+    logits[:, 0] += 6.0  # prototype 0을 인위적으로 과대표현시킴
+
+    loss_fn = DINOLoss(logit_dim=logit_dim, center_momentum=0.9,
+                        centering="uniform_push", uniform_push_lr=1.0)
+    _, aux_before = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5,
+                             update_center=False)
+    h_before = aux_before["H_p_bar_t"].item()
+
+    # center 업데이트(EMA + uniform push) 1회 실행
+    _, aux_push = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+    assert aux_push["push_grad_norm"] > 0.0
+
+    _, aux_after = loss_fn(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5,
+                            update_center=False)
+    h_after = aux_after["H_p_bar_t"].item()
+
+    assert h_after > h_before
+
+
+def test_uniform_push_zero_lr_matches_plain_ema():
+    """uniform_push_lr=0이면 centering='uniform_push'도 순수 EMA와 동일해야 함 (회귀 보존)."""
+    torch.manual_seed(1)
+    B, logit_dim = 8, 16
+    logits = torch.randn(B, logit_dim)
+
+    ema_loss = DINOLoss(logit_dim=logit_dim, center_momentum=0.9)
+    push_loss = DINOLoss(logit_dim=logit_dim, center_momentum=0.9,
+                          centering="uniform_push", uniform_push_lr=0.0)
+
+    ema_loss(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+    push_loss(logits, [logits.clone()], teacher_temp=0.5, student_temp=0.5, update_center=True)
+
+    assert torch.allclose(ema_loss.center, push_loss.center)
+
+
+def test_embed_uniform_push_improves_uniformity():
+    torch.manual_seed(0)
+    B, embed_dim = 16, 8
+    embeds = torch.nn.functional.normalize(torch.randn(B, embed_dim) * 0.05 + 1.0, p=2, dim=-1)
+    unif_before = _uniformity(embeds)
+
+    push = EmbedUniformPush(embed_dim=embed_dim, lr=1.0)
+    grad_norm = push.step(embeds)
+    assert grad_norm > 0.0
+
+    shifted = torch.nn.functional.normalize(embeds + push.push, p=2, dim=-1)
+    unif_after = _uniformity(shifted)
+    assert unif_after < unif_before  # 더 음수 = 더 균일 (evaluate.py 관례와 동일)
+
+
+def test_embed_uniform_push_zero_lr_is_noop():
+    torch.manual_seed(1)
+    B, embed_dim = 8, 4
+    embeds = torch.randn(B, embed_dim)
+
+    push = EmbedUniformPush(embed_dim=embed_dim, lr=0.0)
+    grad_norm = push.step(embeds)
+
+    assert grad_norm == 0.0
+    assert torch.all(push.push == 0.0)
 
 
 def test_kl_near_zero_when_teacher_equals_student():

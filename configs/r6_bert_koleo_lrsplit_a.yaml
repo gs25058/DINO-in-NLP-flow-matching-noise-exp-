@@ -1,0 +1,12 @@
+# r6_bert_koleo를 lrsplit_c(backbone lr=2e-4) 위에 적용: KoLeo 정규화가 붕괴 억제
+# 대책(R5 스케줄+head_lr 분리+grad_clip)과 별개로 backbone lr을 더 밀어붙인 상태에서도
+# raw STS 상승 + raw-vs-후처리 격차 축소 효과가 유지/누적되는지 확인한다.
+# 예측 기준선: r5d_bert_lrsplit_c(KoLeo 없음, backbone lr=2e-4) vs r6_bert_koleo_a(KoLeo,
+# backbone lr=3e-5, STS-B dev ~0.624) 각각의 결과.
+# a: koleo_lambda=0.05 (가장 약한 강도)
+extends: r5d_bert_lrsplit_c.yaml
+
+run_name: r6_bert_koleo_lrsplit_a
+
+loss:
+  koleo_lambda: 0.05

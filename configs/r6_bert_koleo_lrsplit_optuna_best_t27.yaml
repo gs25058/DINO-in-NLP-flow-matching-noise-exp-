@@ -1,0 +1,20 @@
+# Optuna 탐색(study: tune_r5d_bert_lrsplit_c_koleo_lrsplit, 30 trial, 750-step 예산,
+# search space "koleo_lrsplit" in scripts/tune.py)의 best trial(#27, sts_b_dev=0.6822
+# @750 step) 값을 그대로 config로 승격. 정확한 전체 30 trial 기록은
+# results/analysis/tune_r5d_bert_lrsplit_c_koleo_lrsplit_trials.csv, 탐색 공간/인사이트
+# 정리는 results/analysis/koleo_lrsplit_optuna.md 참고.
+#
+# 수동 grid 최고(r6_bert_koleo_lrsplit_c, koleo_lambda=0.2 + lr=2e-4, 750-step 환산
+# 기준으로는 미측정이나 1500-step 기준 0.680)를 750-step 예산에서 앞섰다 - 여기서는
+# max_steps를 base(1500)로 되돌려 전체 학습 길이에서도 grid 최고를 넘는지 확인한다.
+extends: r5d_bert_lrsplit_c.yaml
+
+run_name: r6_bert_koleo_lrsplit_optuna_best_t27
+
+train:
+  lr: 0.0001394211135782923
+  head_lr: 0.0007656584425369425
+  grad_clip: 5.211054806696876
+
+loss:
+  koleo_lambda: 0.42271015828660585

@@ -1,0 +1,13 @@
+# lrsplit_a/b 연장: backbone lr을 2.0e-4까지 올림. lrsplit_b(1e-4) 결과가 붕괴 징후
+# 없이 안정적이었던 것("results/analysis/bert_lrsplit/README.md" 참고)에 근거해 더
+# 밀어붙여봄 - R5 스케줄 + head_lr 분리 + LN/bias wd 제외 + grad_clip 조합이 이미
+# BERT의 붕괴를 억제하고 있으니 원래 Table 1 lr(5.4e-4)에 더 가깝게 시도.
+extends: r5d_bert.yaml
+
+run_name: r5d_bert_lrsplit_c
+
+train:
+  lr: 2.0e-4
+  head_lr: 5.4e-4
+  exclude_ln_bias_wd: true
+  grad_clip: 3.0

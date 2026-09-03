@@ -20,6 +20,9 @@ referecne_files/
 *.ipynb_checkpoints/
 *claude*.txt
 
+# scripts/tune.py가 trial마다 만드는 임시 config (실행 중 자동 삭제, 혹시 남으면 무시)
+configs/tmp*.yaml
+
 # 파이썬/도구
 __pycache__/
 *.py[cod]
