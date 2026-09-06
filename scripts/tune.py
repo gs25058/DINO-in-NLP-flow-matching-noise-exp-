@@ -51,6 +51,35 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "loss.teacher_temp_warmup_frac": ("float", {"low": 0.1, "high": 0.5}),
         "train.momentum_end": ("float", {"low": 0.998, "high": 0.9999}),
     },
+    # 스케줄 자체(값 범위/방식/기간)를 전면 탐색. 이 프로젝트에서 스케줄 축은 사실상 한 번도
+    # 튜닝된 적이 없다 - R5에서 "warmup을 넣으면 좋아진다"까지만 확인하고 값은 DINO 원본
+    # 기본값(0.082->0.11, 0.997->0.9995, frac 0.3)을 그대로 써왔다.
+    #
+    # 핵심 동기 두 가지:
+    # (1) 교락 해제 - train.warmup_frac(LR)과 loss.teacher_temp_warmup_frac이 둘 다 0.3으로
+    #     묶여 있어 warmup 종료(step 450)에 생기는 전환이 LR 때문인지 온도 때문인지 구분이
+    #     불가능했다. 두 축을 독립적으로 탐색해 분리한다.
+    # (2) 타이밍 불일치 - 학습의 실질적 이득은 step ~250에서 대부분 끝나는데(모든 1500-step
+    #     run에서 관찰) warmup은 450까지 이어진다. 기간이 짧은 쪽이 유리한지 확인한다.
+    #
+    # 주의: 이 공간은 max_steps=1500(배포 길이)에서 돌려야 한다. 모든 파라미터가
+    # frac*max_steps라서 750-step 예산으로 튜닝하면 절대 step이 절반이 되어 결과가 전이되지
+    # 않는다(cov_iso t18에서 750-step 우위가 1500-step에서 사라진 전례도 있다).
+    #     uv run python scripts/tune.py --base-config <챔피언 config> \
+    #         --space r5_schedules_full --max-steps 1500 --n-trials 40 --n-jobs 2 --gpus <idle>
+    "r5_schedules_full": {
+        # 값 범위
+        "loss.warmup_teacher_temp": ("float", {"low": 0.04, "high": 0.10}),
+        "loss.teacher_temp": ("float", {"low": 0.09, "high": 0.20}),
+        "train.momentum_end": ("float", {"low": 0.998, "high": 0.9999}),
+        # 기간
+        "loss.teacher_temp_warmup_frac": ("float", {"low": 0.05, "high": 0.6}),
+        "train.warmup_frac": ("float", {"low": 0.05, "high": 0.5}),
+        "train.momentum_ramp_frac": ("float", {"low": 0.2, "high": 1.0}),
+        # 방식
+        "loss.teacher_temp_shape": ("categorical", {"choices": ["linear", "cosine"]}),
+        "train.momentum_shape": ("categorical", {"choices": ["linear", "cosine"]}),
+    },
     # KoLeo(loss.koleo_lambda)와 lrsplit 안정화 축(train.lr/head_lr/grad_clip)이 각각 단독
     # 효과가 거의 그대로 누적되는 것을 수동 grid(r6_bert_koleo_lrsplit_a/b/c, lr=2e-4 고정)
     # 에서 확인했다 - 이 4개를 joint로 탐색해 개별 최적점의 조합이 grid의 최고값(raw
@@ -61,6 +90,24 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
     # 안정화 스택 없이는 붕괴했었다(r5d_bert_lrsplit_c까지의 안정화 축 참고).
     "koleo_lrsplit": {
         "loss.koleo_lambda": ("float", {"low": 0.01, "high": 0.5, "log": True}),
+        "train.lr": ("float", {"low": 3.0e-5, "high": 5.4e-4, "log": True}),
+        "train.head_lr": ("float", {"low": 1.0e-4, "high": 1.0e-3, "log": True}),
+        "train.grad_clip": ("float", {"low": 1.0, "high": 6.0}),
+    },
+    # R7 cov_iso의 "제대로 된" 검증용 공간. 수동 grid(r7_coviso_bert_lam{0.5,1,2}, EMA
+    # momentum/start_step 고정)에서는 λ를 4배 늘려도 STS가 0.607~0.612에 갇혀 게이트가
+    # 걸렸는데, 그게 방법 자체의 한계인지 파라미터 선택 문제인지 구분하려면 cov_iso 자체
+    # 파라미터(λ/EMA momentum/시작 시점)와 안정화 축(lr/head_lr/grad_clip)을 joint로 넓게
+    # 봐야 한다.
+    # base config는 koleo_lrsplit 탐색과 동일하게 configs/r5d_bert_lrsplit_c.yaml을 쓴다 -
+    # KoLeo가 최고값(trial 27, sts_b_dev=0.6822@750)을 낸 것과 정확히 같은 조건(같은 base,
+    # 같은 lr/head_lr/grad_clip 축)에서 정규화 항만 바꿔 비교하기 위함. 이 base는
+    # koleo_lambda를 설정하지 않아 기본값 0.0 - KoLeo 오염 없음.
+    # λ 상한(8.0)은 수동 grid 최대값(2.0)의 4배 - "더 세게 걸면 되는가"를 확인하는 범위.
+    "cov_iso_full": {
+        "loss.cov_iso_lambda": ("float", {"low": 0.1, "high": 8.0, "log": True}),
+        "loss.cov_ema_momentum": ("float", {"low": 0.80, "high": 0.999}),
+        "loss.cov_iso_start_step": ("int", {"low": 0, "high": 200}),
         "train.lr": ("float", {"low": 3.0e-5, "high": 5.4e-4, "log": True}),
         "train.head_lr": ("float", {"low": 1.0e-4, "high": 1.0e-3, "log": True}),
         "train.grad_clip": ("float", {"low": 1.0, "high": 6.0}),
@@ -77,13 +124,24 @@ def set_by_path(cfg: dict, dotted: str, value) -> None:
     node[keys[-1]] = value
 
 
-def parse_final_sts(log_path: Path) -> float | None:
-    """train.log에서 마지막 'EVAL sts_b_dev=...' 값을 읽는다. 없으면 None(실패/미완주)."""
+def parse_final_sts(log_path: Path, min_step: int = 0) -> float | None:
+    """train.log에서 마지막 'EVAL sts_b_dev=...' 값을 읽는다. 없으면 None(실패/미완주).
+
+    min_step: 마지막 EVAL이 이 step 미만이면 None을 반환한다(중도 사망 처리). 이게 없으면
+    step 0 EVAL만 남기고 죽은 run이 "사전학습 초기값(BERT 기준 0.5931)"을 정상 점수로
+    보고해버려서, Optuna가 그 영역을 '탐색했는데 나쁨'으로 학습한다 - 실제로
+    tune_r5d_bert_lrsplit_c_cov_iso_full study의 40 trial 중 11개가 이렇게 기록됐다.
+    """
     if not log_path.exists():
         return None
     text = log_path.read_text(errors="ignore")
-    matches = re.findall(r"EVAL sts_b_dev=([-\d.eE+]+)", text)
-    return float(matches[-1]) if matches else None
+    matches = re.findall(r"\[step (\d+)\] EVAL sts_b_dev=([-\d.eE+]+)", text)
+    if not matches:
+        return None
+    last_step, last_sts = matches[-1]
+    if int(last_step) < min_step:
+        return None
+    return float(last_sts)
 
 
 class GpuPool:
@@ -144,9 +202,11 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
             Path(tmp_path).unlink(missing_ok=True)
 
     log_path = ROOT / "results" / "logs" / cfg["run_name"] / "train.log"
-    sts = parse_final_sts(log_path)
+    # train.py는 step == max_steps-1에서 반드시 EVAL을 찍으므로, 마지막 EVAL이 거기 못 미치면
+    # 완주하지 못한 run이다(중도 사망) - 점수 대신 pruned로 처리한다.
+    sts = parse_final_sts(log_path, min_step=max_steps - 1)
     if sts is None:
-        print(f"[tune] trial {trial.number} FAILED params={trial.params}\n"
+        print(f"[tune] trial {trial.number} FAILED/INCOMPLETE params={trial.params}\n"
               f"--- stderr tail ---\n{result.stderr[-2000:]}")
         raise optuna.TrialPruned()
     print(f"[tune] trial {trial.number}: sts_b_dev={sts:.4f} params={trial.params}")

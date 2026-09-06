@@ -1,0 +1,16 @@
+# R7 cov_iso 캘리브레이션 dry-run (METHOD.md §9, results/analysis/coviso/report.md).
+# cov_iso_lambda=1.0으로 200 step만 돌려 L_iso와 DINO CE의 크기/grad 기여를 비교해
+# 본 실험(r7_coviso_a/b/c)의 λ 후보를 정한다. KoLeo는 명시적으로 끔(중첩 방지).
+extends: r5d_combined.yaml
+
+run_name: r7_coviso_calib
+
+loss:
+  koleo_lambda: 0.0
+  cov_iso_lambda: 1.0
+  cov_ema_momentum: 0.99
+  cov_iso_start_step: 50
+
+train:
+  diag_grad_norms: true
+  diag_coviso_grad_split: true

@@ -1,0 +1,11 @@
+# r7_coviso_lam0.5와 동일, cov_iso_lambda=1.0 (중간 강도 - 캘리브레이션에서 직접 안정성을
+# 확인한 값: L_iso 0.53->0.03 단조 감소, cov_iso 단독 backbone grad가 DINO CE와 유사 스케일).
+extends: r5d_combined.yaml
+
+run_name: r7_coviso_lam1
+
+loss:
+  koleo_lambda: 0.0
+  cov_iso_lambda: 1.0
+  cov_ema_momentum: 0.99
+  cov_iso_start_step: 50

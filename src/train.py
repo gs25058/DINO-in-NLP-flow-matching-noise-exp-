@@ -27,9 +27,9 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
-from src.loss import DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
+from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
 from src.model import DinoTextModel, EMATeacher
-from src.schedules import teacher_momentum_schedule, teacher_temp_schedule
+from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -198,6 +198,13 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     embed_push_lr = cfg["loss"].get("embed_push_lr", 0.0)
     embed_uniform_push = EmbedUniformPush(student.backbone.config.hidden_size, embed_push_lr).to(device)
 
+    cov_iso_lambda = cfg["loss"].get("cov_iso_lambda", 0.0)
+    cov_ema_momentum = cfg["loss"].get("cov_ema_momentum", 0.99)
+    cov_iso_start_step = cfg["loss"].get("cov_iso_start_step", 50)
+    cov_iso_penalty = None
+    if cov_iso_lambda > 0:
+        cov_iso_penalty = CovIsoPenalty(student.backbone.config.hidden_size, cov_ema_momentum).to(device)
+
     velocity_head = None
     if cfg["loss"]["velocity_head"]:
         hidden = student.backbone.config.hidden_size
@@ -222,10 +229,21 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     teacher_temp_warmup_steps = (
         max(1, int(teacher_temp_warmup_frac * max_steps)) if warmup_teacher_temp is not None else None
     )
+    teacher_temp_shape = cfg["loss"].get("teacher_temp_shape", "linear")
     momentum_start = cfg["train"].get("momentum_start")
     momentum_end = cfg["train"].get("momentum_end")
+    momentum_shape = cfg["train"].get("momentum_shape", "cosine")
+    # ramp_frac 미지정이면 1.0 = 전 구간 ramp(기존 동작). 더 작으면 그 시점에 ramp가 끝나고
+    # 이후로는 momentum_end가 유지된다.
+    momentum_ramp_frac = cfg["train"].get("momentum_ramp_frac", 1.0)
+    momentum_ramp_steps = max(1, int(momentum_ramp_frac * max_steps))
 
-    koleo_lambda = cfg["loss"].get("koleo_lambda", 0.0)
+    koleo_lambda_max = cfg["loss"].get("koleo_lambda", 0.0)
+    koleo_hold_frac = cfg["loss"].get("koleo_hold_frac")
+    koleo_decay_frac = cfg["loss"].get("koleo_decay_frac")
+    koleo_min_ratio = cfg["loss"].get("koleo_min_ratio")
+    koleo_hold_steps = int(koleo_hold_frac * max_steps) if koleo_hold_frac is not None else None
+    koleo_decay_steps = int(koleo_decay_frac * max_steps) if koleo_decay_frac is not None else None
 
     student_temp = cfg["loss"]["student_temp"]
     max_tokens = cfg["data"]["max_tokens"]
@@ -241,6 +259,11 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     diag_confidence = cfg["train"].get("diag_confidence", False)
     diag_drift = cfg["train"].get("diag_drift", False)
     dense_early_eval = cfg["train"].get("dense_early_eval", False)
+    # R7 캘리브레이션 전용: cov_iso_lambda*L_iso 단독 backward로 backbone grad norm을 측정해
+    # diag_grad_norm_backbone(결합 backward, DINO CE+koleo+cov_iso 전부 포함)과 비교하면
+    # cov_iso가 실제로 얼마만큼의 grad를 기여하는지 알 수 있다. 계산량이 늘어나므로(추가
+    # backward 1회) 캘리브레이션 dry-run에서만 켠다.
+    diag_coviso_grad_split = cfg["train"].get("diag_coviso_grad_split", False)
 
     n_tbins = 5
     tbin_sums = [0.0] * n_tbins
@@ -266,9 +289,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         special_mask = enc["special_tokens_mask"].bool().to(device) | (~attention_mask.bool())
 
         if warmup_teacher_temp is not None:
-            teacher_temp = teacher_temp_schedule(step, warmup_teacher_temp, teacher_temp_static, teacher_temp_warmup_steps)
+            teacher_temp = teacher_temp_schedule(step, warmup_teacher_temp, teacher_temp_static,
+                                                 teacher_temp_warmup_steps, teacher_temp_shape)
         else:
             teacher_temp = teacher_temp_static
+
+        koleo_lambda = resolve_koleo_lambda(step, koleo_lambda_max, koleo_hold_steps, koleo_decay_steps, koleo_min_ratio)
 
         token_embeds = student.get_input_embeddings()(input_ids)
         views = aug(token_embeds, special_mask, step)
@@ -283,6 +309,9 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         student_logits = []
         vel_losses = []
         koleo_losses = []
+        cov_iso_losses = []
+        cov_iso_mean_terms = []
+        cov_iso_cov_terms = []
         for k, s_embeds in enumerate(views.student_embeds):
             s_embedding, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
@@ -291,6 +320,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
             if koleo_lambda > 0:
                 koleo_losses.append(koleo_loss(s_embedding))
+            if cov_iso_penalty is not None:
+                # EMA 통계는 step 0부터 계속 갱신(자리 잡을 시간을 준다) - cov_iso_start_step
+                # 이전에는 아래에서 total_loss에 더하지 않을 뿐. K개 뷰 전부에 대해 호출하므로
+                # 한 스텝 안에서 버퍼가 K번 순차 갱신된다(뷰마다 다른 노이즈 레벨의 실제 샘플).
+                l_iso, iso_aux = cov_iso_penalty(s_embedding)
+                cov_iso_losses.append(l_iso)
+                cov_iso_mean_terms.append(iso_aux["L_iso_mean"])
+                cov_iso_cov_terms.append(iso_aux["L_iso_cov"])
 
         loss, aux = dino_loss(t_logits, student_logits, teacher_temp, student_temp)
         total_loss = loss
@@ -302,6 +339,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             l_koleo = torch.stack(koleo_losses).mean()
             total_loss = total_loss + koleo_lambda * l_koleo
             aux["L_koleo"] = l_koleo.detach()
+        if cov_iso_losses and step >= cov_iso_start_step:
+            l_iso_total = torch.stack(cov_iso_losses).mean()
+            total_loss = total_loss + cov_iso_lambda * l_iso_total
+            aux["L_iso"] = l_iso_total.detach()
+            aux["L_iso_mean"] = torch.stack(cov_iso_mean_terms).mean()
+            aux["L_iso_cov"] = torch.stack(cov_iso_cov_terms).mean()
 
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
@@ -311,10 +354,17 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                     tbin_sums[b] += kl_k
                     tbin_counts[b] += 1
 
+        grad_norm_log = {}
+        if diag_coviso_grad_split and cov_iso_losses and step >= cov_iso_start_step:
+            optimizer.zero_grad()
+            (cov_iso_lambda * l_iso_total).backward(retain_graph=True)
+            grad_norm_log["diag_grad_norm_coviso_only_backbone"] = torch.nn.utils.clip_grad_norm_(
+                list(student.backbone.parameters()), max_norm=1e10
+            ).item()
+
         optimizer.zero_grad()
         total_loss.backward()
 
-        grad_norm_log = {}
         if diag_grad_norms:
             # max_norm=1e10 -> 사실상 clip 없이 그룹별 norm만 측정 (진단용)
             grad_norm_log["diag_grad_norm_backbone"] = torch.nn.utils.clip_grad_norm_(
@@ -335,7 +385,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         optimizer.step()
         scheduler.step()
         if momentum_start is not None:
-            teacher.momentum = teacher_momentum_schedule(step, momentum_start, momentum_end, max_steps)
+            teacher.momentum = teacher_momentum_schedule(step, momentum_start, momentum_end,
+                                                         momentum_ramp_steps, momentum_shape)
         teacher.update(student)
 
         if step % log_every == 0 or step == max_steps - 1:
@@ -352,6 +403,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 log["L_vel"] = aux["L_vel"].item()
             if "L_koleo" in aux:
                 log["L_koleo"] = aux["L_koleo"].item()
+            if koleo_lambda_max > 0:
+                log["koleo_lambda"] = koleo_lambda
+            if "L_iso" in aux:
+                log["L_iso"] = aux["L_iso"].item()
+                log["L_iso_mean"] = aux["L_iso_mean"].item()
+                log["L_iso_cov"] = aux["L_iso_cov"].item()
             if "push_grad_norm" in aux:
                 log["push_grad_norm"] = aux["push_grad_norm"]
             if embed_push_lr > 0:

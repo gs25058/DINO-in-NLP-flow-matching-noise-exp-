@@ -142,6 +142,65 @@ class EmbedUniformPush(nn.Module):
         return grad.norm().item()
 
 
+class CovIsoPenalty(nn.Module):
+    """R7: 배치 공분산을 등방(isotropic)으로 미는 분포 통계량 정규화 (METHOD.md §9 - KoLeo와
+    달리 쌍별 반발이 아니라 배치 요약 통계량 하나에만 페널티가 걸리는 형태라 허용 범주).
+
+    z: L2 정규화된 student pooled 임베딩 [B, D] (koleo_loss와 동일 지점 - model.py
+    DinoTextModel.forward의 첫 번째 반환값, head 출력 logits이 아님).
+
+    평균 mu와 2차 모멘트 M2를 EMA로 추적하되, 그 EMA 값(detached)을 현재 배치의 (미분 가능한)
+    평균/2차 모멘트와 같은 momentum으로 다시 한번 블렌드해 페널티를 계산한다 - 이렇게 하면
+    gradient가 오직 "현재 배치가 EMA를 얼마나 밀 수 있는가"라는 (1-m) 몫을 통해서만 z로
+    흐르고, 장기 통계는 EMA 절반이 안정적으로 붙잡아준다.
+      - mu_blend 항(||mu_blend||^2)은 평가 후처리의 centering(평균을 원점으로)을,
+      - C_norm 항(등방 목표 I/D와의 편차)은 PC 제거(스펙트럼 평탄화)를
+    각각 학습 중 loss에 내장한 것이다.
+
+    버퍼 갱신은 DINOLoss.center와 동일한 순서를 따른다: forward()는 먼저 (갱신 *전*의) EMA
+    버퍼로 페널티를 계산하고, 그 다음에 이번 배치 통계를 no_grad로 버퍼에 반영한다.
+    """
+
+    def __init__(self, embed_dim: int, momentum: float):
+        super().__init__()
+        self.momentum = momentum
+        self.register_buffer("mu_ema", torch.zeros(embed_dim))
+        self.register_buffer("m2_ema", torch.eye(embed_dim) / embed_dim)
+
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        d = z.shape[-1]
+        m = self.momentum
+        batch_mu = z.mean(dim=0)
+        batch_m2 = (z.t() @ z) / z.shape[0]
+
+        mu_blend = m * self.mu_ema.detach() + (1.0 - m) * batch_mu
+        m2_blend = m * self.m2_ema.detach() + (1.0 - m) * batch_m2
+        cov = m2_blend - torch.outer(mu_blend, mu_blend)
+        cov_norm = cov / cov.trace().clamp_min(1e-8)
+
+        target = torch.eye(d, device=z.device, dtype=z.dtype) / d
+        l_iso_mean = mu_blend.pow(2).sum()
+        # 스케일 조정(캘리브레이션 dry-run, results/analysis/coviso/report.md 참고): 최초 스펙은
+        # 여기에 *d를 곱했으나, raw ||C_norm - I/d||_F^2 자체가 이미 rank-1 근처에서 ~1
+        # 스케일이라(테스트로 확인) *d를 추가로 곱하면 d=768(hidden_size)에서 최대 ~768까지
+        # 뛴다 - λ=1.0 캘리브레이션에서 cov_iso 단독 backbone grad norm이 순수 DINO CE의
+        # 300배를 넘어 즉시 rank-1 붕괴(eff_rank 1.6)를 일으키는 것으로 실측 확인됨. *d를
+        # 제거해 raw Frobenius 값을 그대로 쓴다 - 이러면 rank-1에서 ~1, 등방에서 ~0로
+        # ||mu||^2 ∈ [0,1] 항과 실제로 유사 스케일이 된다(원래 의도한 "D를 곱해 유사 스케일로"
+        # 라는 목표는 D를 곱하지 않아야 달성됨 - 최초 스펙의 스케일 추정이 반대 방향이었음).
+        l_iso_cov = (cov_norm - target).pow(2).sum()
+        l_iso = l_iso_mean + l_iso_cov
+
+        self._update_ema(batch_mu.detach(), batch_m2.detach())
+
+        return l_iso, {"L_iso_mean": l_iso_mean.detach(), "L_iso_cov": l_iso_cov.detach()}
+
+    @torch.no_grad()
+    def _update_ema(self, batch_mu: torch.Tensor, batch_m2: torch.Tensor) -> None:
+        self.mu_ema.mul_(self.momentum).add_(batch_mu, alpha=1.0 - self.momentum)
+        self.m2_ema.mul_(self.momentum).add_(batch_m2, alpha=1.0 - self.momentum)
+
+
 def batch_kl_diagnostic(
     student_logits: list[torch.Tensor], student_temp: float, n_pairs: int = 256
 ) -> torch.Tensor:

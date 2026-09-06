@@ -1,0 +1,15 @@
+# R7 cov_iso 본 실험 - BERT (2026-09-03 합의: SimCSE 등과의 공정 비교를 위해 모든 실험은
+# BERT로 진행. ModernBERT로 먼저 돌렸던 본 실험은 이 합의 이전 것이라 폐기하고 BERT로 재실행).
+# 캘리브레이션(r7_coviso_calib, ModernBERT/r5d_combined 기반, 200 step)에서 λ=1.0 안정성을
+# 확인했고, BERT swap 확인 run(r7_bert_coviso_swap_t27, λ=2.0)도 붕괴 없이 완주해 λ가 BERT에서도
+# 안전한 범위임을 별도로 확인했다 - BERT 전용 재캘리브레이션 없이 동일 λ 후보 {0.5,1,2} 사용.
+# KoLeo는 명시적으로 꺼서 중첩을 방지한다.
+extends: r5d_bert.yaml
+
+run_name: r7_coviso_bert_lam0.5
+
+loss:
+  koleo_lambda: 0.0
+  cov_iso_lambda: 0.5
+  cov_ema_momentum: 0.99
+  cov_iso_start_step: 50

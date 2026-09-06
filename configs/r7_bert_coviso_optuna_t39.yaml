@@ -1,0 +1,25 @@
+# cov_iso Optuna 탐색(study: tune_r5d_bert_lrsplit_c_cov_iso_full, 40 trial, 750-step 예산,
+# search space "cov_iso_full" in scripts/tune.py) 상위 5개 중 5위(trial 39,
+# sts_b_dev=0.6910 @750 step) 값을 config로 승격. 전체 trial 기록은
+# results/analysis/tune_r5d_bert_lrsplit_c_cov_iso_full_trials.csv 참고.
+#
+# 배경: 수동 grid(λ∈{0.5,1,2}, results/analysis/coviso/report.md)는 BERT에서 STS 이득이
+# 없다는 게이트 판정을 냈지만, 그건 λ 탐색 범위가 4~16배 낮았던 아티팩트였다 - 이 study의
+# 상위권은 λ≈4.6~7.9, cov_ema_momentum≈0.82~0.87에 몰려 있고 KoLeo 최고값(trial 27,
+# 0.6822@750)을 넘었다. 여기서는 max_steps를 base(1500)로 되돌려 전체 학습 길이 + 2시드로
+# 그 우위가 유지되는지 검증한다.
+#
+# base는 KoLeo 탐색과 동일한 configs/r5d_bert_lrsplit_c.yaml (koleo_lambda 미설정 = 0.0).
+extends: r5d_bert_lrsplit_c.yaml
+
+run_name: r7_bert_coviso_optuna_t39
+
+train:
+  lr: 0.0001136785037178
+  head_lr: 0.0002223667254288
+  grad_clip: 5.486056971085183
+
+loss:
+  cov_iso_lambda: 4.632999378981731
+  cov_ema_momentum: 0.8578197087065287
+  cov_iso_start_step: 61
