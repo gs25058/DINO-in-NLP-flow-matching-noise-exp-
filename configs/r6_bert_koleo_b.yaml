@@ -1,7 +1,0 @@
-# r6_bert_koleo_a와 동일, koleo_lambda=0.1 (중간 강도)
-extends: r5d_bert.yaml
-
-run_name: r6_bert_koleo_b
-
-loss:
-  koleo_lambda: 0.1

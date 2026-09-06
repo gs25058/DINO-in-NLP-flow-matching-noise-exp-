@@ -1,7 +1,0 @@
-# r6_bert_koleo_lrsplit_a와 동일, koleo_lambda=0.2 (가장 강한 강도)
-extends: r5d_bert_lrsplit_c.yaml
-
-run_name: r6_bert_koleo_lrsplit_c
-
-loss:
-  koleo_lambda: 0.2

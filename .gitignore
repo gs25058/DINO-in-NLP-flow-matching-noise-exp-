@@ -33,3 +33,8 @@ __pycache__/
 
 # uv.lock은 재현성을 위해 반드시 포함 (ignore 금지)
 !uv.lock
+
+# 종료된 실험의 config 아카이브 (로컬 보관용, 원격에는 올리지 않는다).
+# 결론은 results/analysis/ 리포트에 기록돼 있고, 재현이 필요하면 로컬 아카이브에서 꺼내 쓴다.
+configs/archive_modernbert/
+configs/archive_bert/
