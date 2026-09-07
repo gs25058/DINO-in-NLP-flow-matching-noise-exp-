@@ -1,0 +1,24 @@
+# 스케줄 튜닝(study: tune_r7_bert_coviso_optuna_t35_r5_schedules_full, 60 trial, 1500-step,
+# search space "r5_schedules_full") best trial(#50, sts_b_dev=0.7173 @seed42)을 승격.
+# 전체 기록: results/analysis/tune_r7_bert_coviso_optuna_t35_r5_schedules_full_trials.csv
+#
+# 핵심 발견: warmup이 너무 길었다. LR warmup은 frac 0.30(step 450) -> 0.052(step 77),
+# teacher_temp warmup은 0.30(step 450) -> 0.079(step 118).
+# 두 축을 독립 탐색해 교락을 푼 결과 LR warmup 기간의 영향이 압도적이었다(상관 -0.82 vs -0.37).
+# momentum ramp도 전 구간 -> frac 0.408(step 611)에서 끝나고
+# 종착값도 0.9995 -> 0.99850로 낮다.
+extends: r7_bert_coviso_optuna_t35.yaml
+
+run_name: r8_bert_coviso_sched_optuna_t50
+
+train:
+  warmup_frac: 0.0517088539939031
+  momentum_end: 0.9985014352751024
+  momentum_ramp_frac: 0.4077115063691495
+  momentum_shape: cosine
+
+loss:
+  warmup_teacher_temp: 0.0494051972253961
+  teacher_temp: 0.1347501197840043
+  teacher_temp_warmup_frac: 0.0789677221858058
+  teacher_temp_shape: cosine
