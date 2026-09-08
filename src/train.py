@@ -27,9 +27,11 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
-from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
+from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, NbrQueue, batch_kl_diagnostic,
+                      koleo_loss, koleo_nbr_overlap, nbr_cos_overlap, nbr_loss, velocity_loss)
 from src.model import DinoTextModel, EMATeacher
-from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
+from src.schedules import (nbr_ramp, resolve_koleo_lambda, teacher_momentum_schedule,
+                           teacher_temp_schedule)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -201,6 +203,19 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     cov_iso_lambda = cfg["loss"].get("cov_iso_lambda", 0.0)
     cov_ema_momentum = cfg["loss"].get("cov_ema_momentum", 0.99)
     cov_iso_start_step = cfg["loss"].get("cov_iso_start_step", 50)
+
+    # r9: 프로토타입 이웃 끌어당김 항 (L_nbr). nbr 섹션 미지정 시 전부 off = 기존 동작.
+    nbr_cfg = cfg.get("nbr", {})
+    nbr_enabled = nbr_cfg.get("enabled", False)
+    nbr_lam = nbr_cfg.get("lam", 0.1)
+    nbr_tau_w = nbr_cfg.get("tau_w", 0.1)
+    nbr_tau_w_rel = nbr_cfg.get("tau_w_rel")   # 지정 시 행별 최대값 대비 상대 임계(스케일 불변)
+    nbr_topk = nbr_cfg.get("topk", 8)
+    nbr_max = nbr_cfg.get("max_nbr", 16)
+    nbr_qsize = nbr_cfg.get("queue_size", 4096)
+    nbr_start = nbr_cfg.get("start_step", 300)
+    nbr_ramp_steps = nbr_cfg.get("ramp_steps", 200)
+    nbr_queue = None
     cov_iso_penalty = None
     if cov_iso_lambda > 0:
         cov_iso_penalty = CovIsoPenalty(student.backbone.config.hidden_size, cov_ema_momentum).to(device)
@@ -277,9 +292,16 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         drift_idx = drift_rng.sample(range(len(rank_eval_sentences)), n_sub)
         drift_sentences = [rank_eval_sentences[i] for i in drift_idx]
 
+    if nbr_enabled:
+        nbr_queue = NbrQueue(nbr_qsize, nbr_topk, student.backbone.config.hidden_size, device)
+
     student.train()
     for step in range(max_steps):
-        batch_sentences = random.sample(sentences, batch_size)
+        # 인덱스로 샘플링한다: 큐에 데이터셋 인덱스를 저장해 같은 문장을 이웃에서 제외해야 하기
+        # 때문. random.sample은 population 내용이 아니라 (n, k)에만 의존하므로 기존
+        # random.sample(sentences, batch_size)와 동일한 선택·동일한 RNG 상태를 유지한다.
+        batch_idx = random.sample(range(len(sentences)), batch_size)
+        batch_sentences = [sentences[i] for i in batch_idx]
         enc = tokenizer(
             batch_sentences, truncation=True, max_length=max_tokens, padding=True,
             return_special_tokens_mask=True, return_tensors="pt",
@@ -307,6 +329,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
+        student_embeds = []      # r9 L_nbr용: 뷰별 pooled 임베딩 (추가 forward 없이 재사용)
         vel_losses = []
         koleo_losses = []
         cov_iso_losses = []
@@ -315,6 +338,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         for k, s_embeds in enumerate(views.student_embeds):
             s_embedding, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
+            student_embeds.append(s_embedding)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
@@ -346,6 +370,30 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             aux["L_iso_mean"] = torch.stack(cov_iso_mean_terms).mean()
             aux["L_iso_cov"] = torch.stack(cov_iso_cov_terms).mean()
 
+        nbr_W = None
+        if nbr_enabled:
+            ds_idx_t = torch.as_tensor(batch_idx, device=device)
+            l_nbr, nbr_aux, nbr_W = nbr_loss(
+                student_embeds, nbr_queue, ds_idx_t, aux["p_t"],
+                nbr_tau_w, nbr_max, nbr_topk, tau_w_rel=nbr_tau_w_rel,
+            )
+            lam_eff = nbr_lam * nbr_ramp(step, nbr_start, nbr_ramp_steps)
+            if lam_eff > 0:
+                total_loss = total_loss + lam_eff * l_nbr
+            aux["L_nbr"] = l_nbr.detach()
+            aux["nbr_lam_eff"] = lam_eff
+            aux.update(nbr_aux)
+            # koleo_nbr_overlap은 KoLeo가 켜진 config에서만 의미가 있다(r9 기준 run은
+            # cov_iso 계열이라 koleo_lambda=0). r9에서는 nbr_cos_overlap을 주 지표로 쓴다.
+            if koleo_lambda > 0:
+                aux["koleo_nbr_overlap"] = koleo_nbr_overlap(t_embedding, ds_idx_t, nbr_queue, nbr_W)
+            ov, ov_rand = nbr_cos_overlap(t_embedding, nbr_queue, nbr_W)
+            aux["nbr_cos_overlap"] = ov
+            aux["nbr_cos_overlap_rand"] = ov_rand
+            # push는 backward *이후*에 한다 (아래). nbr_loss의 z_s @ z_q.t()가 큐 텐서를
+            # 그래프에 저장하므로, backward 전에 큐를 in-place로 덮어쓰면 version 불일치로
+            # RuntimeError가 난다. 현 배치가 자기 이웃이 되는 것을 막는다는 명세 취지는 동일.
+
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
                 kl_k = aux["kl_per_view"][k].item()
@@ -364,6 +412,9 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         optimizer.zero_grad()
         total_loss.backward()
+        if nbr_enabled:
+            # backward가 끝나 그래프가 해제된 뒤에 큐를 갱신한다(위 주석 참고).
+            nbr_queue.push(t_embedding, aux["p_t"], ds_idx_t)
 
         if diag_grad_norms:
             # max_norm=1e10 -> 사실상 clip 없이 그룹별 norm만 측정 (진단용)
@@ -403,6 +454,13 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 log["L_vel"] = aux["L_vel"].item()
             if "L_koleo" in aux:
                 log["L_koleo"] = aux["L_koleo"].item()
+            if nbr_enabled:
+                log["L_nbr"] = aux["L_nbr"].item()
+                for k in ("nbr_lam_eff", "n_nbr_mean", "nbr_valid_frac", "nbr_w_max_mean",
+                          "nbr_w_raw_max", "nbr_cos_overlap", "nbr_cos_overlap_rand"):
+                    log[k] = aux[k]
+                if "koleo_nbr_overlap" in aux:
+                    log["koleo_nbr_overlap"] = aux["koleo_nbr_overlap"]
             if koleo_lambda_max > 0:
                 log["koleo_lambda"] = koleo_lambda
             if "L_iso" in aux:

@@ -258,3 +258,155 @@ def velocity_loss(
     keep = (~special_mask).to(per_token.dtype)
     denom = keep.sum().clamp_min(1.0)
     return (per_token * keep).sum() / denom
+
+
+class NbrQueue:
+    """r9 L_nbr용 FIFO 큐: teacher anchor 뷰의 pooled 임베딩 + p_t의 top-k + 데이터셋 인덱스.
+
+    loss 계산 *이후*에 push한다(현 배치가 자기 이웃이 되는 것 방지). 전부 no_grad,
+    체크포인트에 포함하지 않는다(재시작 시 다시 채워진다).
+    """
+
+    def __init__(self, queue_size: int, topk: int, dim: int, device):
+        self.size, self.topk = queue_size, topk
+        self.z = torch.zeros(queue_size, dim, device=device)
+        self.val = torch.zeros(queue_size, topk, device=device)
+        self.idx = torch.zeros(queue_size, topk, dtype=torch.long, device=device)
+        self.ds_idx = torch.full((queue_size,), -1, dtype=torch.long, device=device)
+        self.ptr, self.filled = 0, 0
+
+    @torch.no_grad()
+    def push(self, z_t: torch.Tensor, p_t: torch.Tensor, ds_idx: torch.Tensor) -> None:
+        val, idx = p_t.topk(self.topk, dim=-1)
+        n = z_t.size(0)
+        pos = (torch.arange(n, device=z_t.device) + self.ptr) % self.size
+        self.z[pos], self.val[pos], self.idx[pos] = z_t.detach(), val, idx
+        self.ds_idx[pos] = ds_idx
+        self.ptr = (self.ptr + n) % self.size
+        self.filled = min(self.filled + n, self.size)
+
+    def view(self):
+        """채워진 부분만 반환 (z, val, idx, ds_idx)."""
+        n = self.filled
+        return self.z[:n], self.val[:n], self.idx[:n], self.ds_idx[:n]
+
+
+@torch.no_grad()
+def sparse_proto_affinity(val_b, idx_b, val_q, idx_q) -> torch.Tensor:
+    """W_ij = Σ_k p_i[k]·p_j[k], top-k 인덱스 교집합 위에서만 (희소 내적).
+
+    val_*/idx_*: [N, K] (top-k 값/인덱스). 반환 [B, Q].
+    """
+    match = idx_b[:, None, :, None] == idx_q[None, :, None, :]      # [B,Q,K,K]
+    prod = val_b[:, None, :, None] * val_q[None, :, None, :]
+    return (prod * match).sum(dim=(-1, -2))
+
+
+def nbr_loss(z_students: list[torch.Tensor], queue: NbrQueue, ds_idx: torch.Tensor,
+             p_t: torch.Tensor, tau_w: float, max_nbr: int, topk: int,
+             tau_w_rel: float | None = None):
+    """L_nbr = mean_{valid i} Σ_j W_ij (1 − cos(z_s(x_i^v), sg(z_t(x_j))))  — 끌어당김 전용.
+
+    이웃 선별은 두 방식 중 하나다:
+      tau_w_rel is None : W > tau_w (절대 임계, 원 명세)
+      tau_w_rel 지정     : W > tau_w_rel * (행별 최대 W)  (스케일 불변)
+    절대 임계를 쓸 수 없어 상대 방식을 추가했다 - p_t가 거의 균일해(H≈8.97 vs ln8192=9.01)
+    W의 절대 스케일이 ~1e-7이고 학습 상태에 따라 요동치므로, 절대 임계는 어떤 값을 잡아도
+    "이웃이 잡히는가"가 tau_w 튜닝 문제로 환원된다.
+
+    반환 (loss, aux, W). W는 행 정규화된 이웃 가중치 [B,Q] (koleo_nbr_overlap 진단용).
+    유효 이웃이 하나도 없으면 loss=0(그래디언트 없음)과 진단만 돌려준다.
+    """
+    z_q, val_q, idx_q, ds_q = queue.view()
+    zero = z_students[0].sum() * 0.0  # dtype/device 유지용 0
+    aux = {"n_nbr_mean": 0.0, "nbr_valid_frac": 0.0, "nbr_w_max_mean": 0.0, "nbr_w_raw_max": 0.0}
+    if z_q.size(0) == 0:
+        return zero, aux, None
+
+    with torch.no_grad():
+        val_b, idx_b = p_t.topk(topk, dim=-1)
+        W = sparse_proto_affinity(val_b, idx_b, val_q, idx_q)          # [B,Q]
+        # 같은 문장을 먼저 지운다: 상대 임계의 기준이 되는 행 최대값이 자기 쌍이면 안 된다
+        W = W * (ds_idx[:, None] != ds_q[None, :])
+        if tau_w_rel is None:
+            W = W * (W > tau_w)
+        else:
+            W = W * (W > tau_w_rel * W.max(dim=1, keepdim=True).values)
+        if W.size(1) > max_nbr:                                        # 행별 top-m만 유지
+            keep_val, keep_idx = W.topk(max_nbr, dim=1)
+            W = torch.zeros_like(W).scatter_(1, keep_idx, keep_val)
+        row_sum = W.sum(dim=1, keepdim=True)
+        valid = (row_sum.squeeze(1) > 0)
+        W = torch.where(row_sum > 0, W / row_sum.clamp_min(1e-12), torch.zeros_like(W))
+        n_valid = int(valid.sum())
+        aux = {
+            "nbr_w_raw_max": float(sparse_proto_affinity(val_b, idx_b, val_q, idx_q).max()),
+            "n_nbr_mean": float((W > 0).sum(dim=1)[valid].float().mean()) if n_valid else 0.0,
+            "nbr_valid_frac": float(valid.float().mean()),
+            "nbr_w_max_mean": float(W[valid].max(dim=1).values.mean()) if n_valid else 0.0,
+        }
+    if n_valid == 0:
+        return zero, aux, W
+
+    per_view = []
+    for z_s in z_students:
+        cos = z_s @ z_q.t()                       # 양쪽 L2 정규화 -> 내적 = cos, 큐는 stop-grad
+        per_view.append(((W * (1.0 - cos)).sum(dim=1)[valid]).mean())
+    return torch.stack(per_view).mean(), aux, W
+
+
+@torch.no_grad()
+def koleo_nbr_overlap(z_batch: torch.Tensor, ds_idx: torch.Tensor, queue: NbrQueue,
+                      W_rows: torch.Tensor | None) -> float:
+    """KoLeo가 미는 배치 내 최근접 이웃이 L_nbr의 이웃 집합에도 들어있는 비율.
+
+    두 항이 같은 쌍을 밀고 당기는지 보는 위험 신호(명세 §로깅). 배치 내 최근접 이웃의
+    데이터셋 인덱스가 큐에 아예 없으면 분모에서 제외한다.
+    """
+    if W_rows is None or queue.filled == 0:
+        return float("nan")
+    _, _, _, ds_q = queue.view()
+    sim = z_batch @ z_batch.t()
+    sim.fill_diagonal_(-2.0)
+    nn_pos = sim.argmax(dim=1)                    # 배치 내 최근접 이웃 위치
+    nn_ds = ds_idx[nn_pos]                        # 그 문장의 데이터셋 인덱스
+    num = den = 0
+    for i in range(z_batch.size(0)):
+        in_queue = (ds_q == nn_ds[i])
+        if not bool(in_queue.any()):
+            continue                              # 큐에 없으면 분모 제외
+        den += 1
+        if bool((W_rows[i][in_queue] > 0).any()):
+            num += 1
+    return num / den if den else float("nan")
+
+
+@torch.no_grad()
+def nbr_cos_overlap(z_batch: torch.Tensor, queue: NbrQueue, W_rows: torch.Tensor | None):
+    """프로토타입 이웃 집합이 pooled 코사인 최근접 집합과 얼마나 겹치는가.
+
+    행마다 m = (프로토타입 이웃 수)로 두고, 큐에서 코사인 상위 m개와의 교집합 비율을 잰다.
+    1.0이면 두 이웃 정의가 일치, 무작위면 m/Q 수준이다(무작위 기준선도 함께 반환).
+
+    r9에서 KoLeo는 꺼져 있어(koleo_lambda=0) 원 명세의 koleo_nbr_overlap이 정의되지 않으므로,
+    "프로토타입 이웃 = 임베딩 이웃인가"를 직접 재는 지표로 대체했다 - P-N3의 판정불가 조건
+    ("프로토타입 이웃 ≠ STS 의미 이웃")을 뒷받침하거나 반박하는 근거가 된다.
+    """
+    if W_rows is None or queue.filled == 0:
+        return float("nan"), float("nan")
+    z_q = queue.view()[0]
+    cos = z_batch @ z_q.t()                       # [B, Q] (양쪽 L2 정규화)
+    counts = (W_rows > 0).sum(dim=1)
+    num = den = 0
+    for i in range(z_batch.size(0)):
+        m = int(counts[i])
+        if m == 0:
+            continue
+        top_cos = set(cos[i].topk(m).indices.tolist())
+        proto = set((W_rows[i] > 0).nonzero(as_tuple=True)[0].tolist())
+        num += len(top_cos & proto)
+        den += m
+    if den == 0:
+        return float("nan"), float("nan")
+    rand_baseline = float(counts[counts > 0].float().mean()) / queue.filled
+    return num / den, rand_baseline

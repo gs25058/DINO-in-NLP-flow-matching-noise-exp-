@@ -63,3 +63,15 @@ def resolve_koleo_lambda(step: int, lam_max: float, hold_steps: int | None, deca
     if hold_steps is None:
         return lam_max
     return koleo_lambda_schedule(step, lam_max, hold_steps, decay_steps, lam_min_ratio)
+
+
+def nbr_ramp(step: int, start_step: int, ramp_steps: int) -> float:
+    """r9 L_nbr 가중치 ramp: start_step까지 0, 이후 ramp_steps 동안 0->1 cosine, 그 뒤 1.
+
+    teacher의 프로토타입 할당이 자리를 잡기 전에는 이웃 구조가 의미 없으므로 늦게 켠다.
+    """
+    if step < start_step:
+        return 0.0
+    if ramp_steps <= 0:
+        return 1.0
+    return _ease(min(1.0, (step - start_step) / ramp_steps), "cosine")
