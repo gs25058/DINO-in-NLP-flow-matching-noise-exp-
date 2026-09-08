@@ -7,10 +7,11 @@ dependencies = [
     "torch==2.5.1",
     "transformers>=4.48",
     "datasets>=3.2",
-    "mteb>=1.34",
-    "pysbd>=0.3.4",
+    "huggingface-hub>=0.26",  # scripts/prepare_data.py: wiki1m 원본 다운로드
+    "safetensors>=0.4",       # scripts/compare_simcse.py: SimCSE 공개 체크포인트 로드
     "scikit-learn>=1.5",      # 길이 probing (ridge)
-    "einops>=0.8",
+    "scipy>=1.11",            # src/evaluate.py: spearmanr (STS 주 지표)
+    "numpy>=1.26",            # scripts/analyze_checkpoints.py 등 지표 집계
     "pyyaml>=6.0",
     "wandb>=0.19",
     "matplotlib>=3.9",
