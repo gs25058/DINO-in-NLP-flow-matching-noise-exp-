@@ -1,0 +1,21 @@
+# r9 변형: tau_w_rel을 0.3으로 낮춰 이웃을 더 넓게 잡는다(P-N1 판정용).
+# r9: 프로토타입 이웃 끌어당김 항 (L_nbr). DINO CE는 프로토타입 할당 일관성만 요구하고
+# 할당 이웃 안의 pooled 코사인에는 압력이 없다 - teacher의 할당 이웃 구조를 pooled(eval)
+# 공간의 *끌어당김 전용* 항으로 옮겨 후반 alignment 악화가 꺾이는지 본다. 반발 항은 없다.
+# 기준 run: r8_bert_coviso_sched_optuna_t50 (시드 42/43, 이미 존재).
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+
+run_name: r9_bert_nbr_relw0.3_t50
+
+nbr:
+  enabled: true
+  lam: 0.1
+  # 절대 임계(tau_w)는 쓸 수 없다: p_t가 거의 균일(H≈8.97 vs ln8192=9.01)해 W~1e-7 규모라
+  # 명세 기본값 0.1은 물론 0.05도 5자릿수 과대다(실측). 행별 최대값 대비 상대 임계로 대체.
+  # 학습 종료 r8 체크포인트 실측: rel 0.5 -> 이웃 7.5개, 0.3 -> 12.8개 (P-N1 목표 5~20 충족)
+  tau_w_rel: 0.3
+  topk: 8
+  max_nbr: 16
+  queue_size: 4096
+  start_step: 300
+  ramp_steps: 200
