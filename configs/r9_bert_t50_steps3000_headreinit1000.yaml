@@ -1,0 +1,21 @@
+# R9 처치군: 1000 step마다 DINO head를 난수 재초기화하며 3000 step 학습.
+# 대조군 r9_bert_t50_steps3000.yaml과의 차이는 head_reinit_every_steps 한 줄뿐이다.
+#
+# 리셋 시점: step 1000, 2000 (step 0은 이미 난수 head라 건너뛴다) -> head 수명 1000 step x 3.
+# 리셋 범위(src/train.py reinit_dino_head): student head + teacher head + head의 Adam
+# optimizer state + DINOLoss.center. backbone과 cov_iso EMA는 유지된다.
+#
+# 가설: 백본이 특정 prototype 배치(head 좌표계)에 과적합되면서 후반 STS가 정체/하락한다면,
+# head를 주기적으로 갈아끼워 "매번 새 분류 문제를 다시 풀게" 하는 것이 백본 표현을
+# 더 일반적인 방향으로 유지시킬 수 있다.
+# 주의: 평가 지표(STS/eff_rank/alignment/uniformity)는 backbone mean-pooled 임베딩만 쓰고
+# head를 통과하지 않으므로, 리셋 순간에 지표가 튀지 않는다. 리셋의 효과는 그 이후 구간의
+# 곡선에서만 나타난다. 반대로 학습 로그(loss/H_pt/KL_pt_ps)는 리셋 직후 step 0 수준으로
+# 되돌아가는 것이 정상이다.
+extends: r9_bert_t50_steps3000.yaml
+
+run_name: r9_bert_t50_steps3000_headreinit1000
+
+train:
+  head_reinit_every_steps: 1000
+  head_reinit_scope: sync

@@ -1,0 +1,10 @@
+# r10 2단계: 1단계 + t 난이도 제어기. c̄가 밴드를 벗어나면 t_ctrl을 움직여 positive 난이도 유지.
+# t_ctrl은 augment의 t_lo/t_hi를 대체한다([t_ctrl-jitter, t_ctrl+jitter]).
+# 밴드 [0.85, 0.90] 근거: 현재 eval alignment ≈ 0.28(제곱거리) <-> cos ≈ 0.86.
+extends: r10b_bert_align_tctrl.yaml
+
+run_name: r10d_bert_align_tctrl_cons
+
+
+cons:
+  lam: 0.3

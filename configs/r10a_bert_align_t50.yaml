@@ -1,0 +1,14 @@
+# r10 1단계: BYOL식 pooled alignment 항만 추가 (고정 t, focal off).
+# 우리 구조엔 eval 공간(pooled 코사인) alignment를 직접 건드리는 항이 없다 - predictor를 통해
+# student 노이즈 뷰가 teacher anchor를 예측하게 한다. 반발 항 없음.
+# P-B1 예측: 자기 쌍 positive가 "공짜"라 L_align이 300 step 내 포화하고 eval alignment는
+# r8과 유의차 없음 -> 난이도 제어(2단계)가 필요하다는 근거.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+
+run_name: r10a_bert_align_t50
+
+align:
+  enabled: true
+  lam: 0.5
+  predictor_hidden: 3072
+  focal_gamma: 0.0

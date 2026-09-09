@@ -34,28 +34,61 @@ STS_SUITE = {
 }
 
 
-@torch.no_grad()
-def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_length=128, pooling="last"):
-    """model: DinoTextModel (forward -> (embedding, logits, hidden)). Final Embedding만 반환.
+#: 평가 가능한 표현 공간. 셋 다 같은 backbone forward에서 파생되므로 함께 뽑으면
+#: 추가 비용은 head MLP 한 번(문장당 768->768->256->8192 곱)뿐이다.
+#:   "embedding"  - mean-pooled + L2 정규화. 기존 유일한 평가 대상이자 논문의 Final Embedding.
+#:   "bottleneck" - DINO head MLP 출력의 L2 정규화판(256차원). head 내부에서 실제로
+#:                  prototype과 내적되는 벡터로, SimCLR류의 "projection head 출력"에 해당.
+#:   "head"       - head 최종 출력 logits(8192차원)를 L2 정규화한 것. prototype 유사도 프로필
+#:                  자체를 문장 표현으로 본 경우.
+EVAL_SPACES = ("embedding", "bottleneck", "head")
 
-    pooling: "last"(기본, 기존과 동일) | "first_last" (model.py DinoTextModel.forward 참고,
+
+def _project_to_space(model, embedding, pooled, space: str) -> torch.Tensor:
+    """forward 결과에서 표현 공간별 벡터를 만든다(모두 L2 정규화된 상태로 반환).
+
+    embedding은 forward가 이미 정규화해 두었으므로 재정규화하지 않는다 - 재정규화는 수학적
+    항등이지만 부동소수점상 bit-identical이 아니라서, 기존 run과의 수치 재현성이 깨진다."""
+    if space == "embedding":
+        return embedding
+    if space == "bottleneck":
+        return F.normalize(model.head.mlp(pooled), p=2, dim=-1)
+    if space == "head":
+        return F.normalize(model.head(pooled), p=2, dim=-1)
+    raise ValueError(f"unknown eval space: {space}")
+
+
+@torch.no_grad()
+def embed_sentences(model, tokenizer, sentences, device, batch_size=64, max_length=128, pooling="last",
+                    spaces=None):
+    """model: DinoTextModel (forward -> (embedding, logits, hidden, pooled)).
+
+    spaces=None(기본): 기존과 완전히 동일하게 Final Embedding 텐서 하나만 반환한다.
+    spaces=("embedding", "head", ...): 같은 backbone forward를 공유해 여러 공간을 한꺼번에
+    뽑아 {space: tensor} dict로 반환한다(EVAL_SPACES 참고). 평가 비용이 공간 수에 비례해
+    늘지 않게 하려는 것이 이 인자의 존재 이유다.
+
+    pooling: "last"(기본, 기존과 동일) | "first_last" | "cls" (model.py DinoTextModel.forward 참고,
     소급 재채점 scripts/rescore_checkpoints.py 전용 - 학습 경로는 이 인자를 넘기지 않는다)."""
+    want = ("embedding",) if spaces is None else tuple(spaces)
     was_training = model.training
     model.eval()
-    embeds = []
+    embeds = {s: [] for s in want}
     for i in range(0, len(sentences), batch_size):
         batch = sentences[i : i + batch_size]
         enc = tokenizer(
             batch, truncation=True, max_length=max_length, padding=True, return_tensors="pt"
         ).to(device)
         token_embeds = model.get_input_embeddings()(enc["input_ids"])
-        embedding, _, _ = model(
+        embedding, _logits, _hidden, pooled = model(
             inputs_embeds=token_embeds, attention_mask=enc["attention_mask"], pooling=pooling
         )
-        embeds.append(embedding.cpu())
+        for s in want:
+            embeds[s].append(_project_to_space(model, embedding, pooled, s).cpu())
     if was_training:
         model.train()
-    return torch.cat(embeds, dim=0)
+    out = {s: torch.cat(v, dim=0) for s, v in embeds.items()}
+    return out["embedding"] if spaces is None else out
 
 
 def postprocess_embeddings(
@@ -103,17 +136,9 @@ def _uniformity(embeds: torch.Tensor, seed: int = 0, n_pairs: int = 500) -> floa
     return torch.log(torch.exp(-2 * d2).mean().clamp_min(1e-12)).item()
 
 
-def sts_b_dev_metrics(model, tokenizer, device, batch_size=64, max_length=128, align_seed=0):
-    """학습 중 매 평가마다 호출. STS-B dev(validation) 한 번의 인코딩으로:
-    - spearman: 학습 중 빠른 추적용 주 성능 지표
-    - alignment/uniformity: SimCSE 논문 Fig.2/각주3과 동일 정의
-      (ppos = score>=4.0[정규화 스케일 0.8] STS-B dev 쌍, pdata = STS-B dev 전체 문장 풀)
-    반환: (spearman, alignment, uniformity)
-    """
-    s1, s2, scores = _load_stsb_dev()
-    e1 = embed_sentences(model, tokenizer, s1, device, batch_size, max_length)
-    e2 = embed_sentences(model, tokenizer, s2, device, batch_size, max_length)
-
+def _stsb_triplet(e1, e2, scores, align_seed: int):
+    """이미 인코딩된 STS-B dev 쌍에서 (spearman, alignment, uniformity)를 낸다.
+    표현 공간이 달라져도 정의는 동일해야 하므로 계산은 여기 한 군데에만 둔다."""
     cos = F.cosine_similarity(e1, e2, dim=-1).numpy()
     spearman = float(spearmanr(cos, scores)[0])
 
@@ -124,8 +149,34 @@ def sts_b_dev_metrics(model, tokenizer, device, batch_size=64, max_length=128, a
 
     pool = torch.cat([e1, e2], dim=0)  # SimCSE 각주3: "all STS-B sentences"
     uniformity = _uniformity(pool, seed=align_seed)
-
     return spearman, alignment, uniformity
+
+
+def sts_b_dev_metrics_by_space(model, tokenizer, device, spaces=("embedding",), batch_size=64,
+                               max_length=128, align_seed=0, pooling="last"):
+    """STS-B dev를 한 번만 인코딩해 여러 표현 공간의 (spearman, alignment, uniformity)를 낸다.
+
+    반환: {space: (spearman, alignment, uniformity)}. backbone forward를 공유하므로 공간을
+    추가해도 평가 시간은 거의 늘지 않는다(추가분은 head MLP뿐)."""
+    s1, s2, scores = _load_stsb_dev()
+    spaces = tuple(spaces)
+    e1 = embed_sentences(model, tokenizer, s1, device, batch_size, max_length, pooling=pooling, spaces=spaces)
+    e2 = embed_sentences(model, tokenizer, s2, device, batch_size, max_length, pooling=pooling, spaces=spaces)
+    return {s: _stsb_triplet(e1[s], e2[s], scores, align_seed) for s in spaces}
+
+
+def sts_b_dev_metrics(model, tokenizer, device, batch_size=64, max_length=128, align_seed=0,
+                      pooling="last"):
+    """학습 중 매 평가마다 호출. STS-B dev(validation) 한 번의 인코딩으로:
+    - spearman: 학습 중 빠른 추적용 주 성능 지표
+    - alignment/uniformity: SimCSE 논문 Fig.2/각주3과 동일 정의
+      (ppos = score>=4.0[정규화 스케일 0.8] STS-B dev 쌍, pdata = STS-B dev 전체 문장 풀)
+    반환: (spearman, alignment, uniformity) - Final Embedding 공간 기준.
+    여러 공간이 필요하면 sts_b_dev_metrics_by_space를 쓴다.
+    """
+    return sts_b_dev_metrics_by_space(
+        model, tokenizer, device, ("embedding",), batch_size, max_length, align_seed, pooling
+    )["embedding"]
 
 
 def sts_b_dev_spearman(model, tokenizer, device, batch_size=64, max_length=128) -> float:
@@ -134,11 +185,12 @@ def sts_b_dev_spearman(model, tokenizer, device, batch_size=64, max_length=128) 
     return spearman
 
 
-def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, max_length=128):
+def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, max_length=128,
+                           pooling="last"):
     """METHOD.md §5: 고정 평가 문장(pooled Final Embedding)의 열 평균 센터링 -> SVD.
     p_i = sigma_i^2 / sum(sigma_j^2); Effective Rank = exp(-sum(p_i log p_i)); Max SV Ratio = p_1.
     """
-    embeds = embed_sentences(model, tokenizer, sentences, device, batch_size, max_length)
+    embeds = embed_sentences(model, tokenizer, sentences, device, batch_size, max_length, pooling=pooling)
     x = embeds - embeds.mean(dim=0, keepdim=True)
     sv = torch.linalg.svdvals(x.double())
     p = (sv**2) / (sv**2).sum()
@@ -147,20 +199,21 @@ def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, m
     return effective_rank, max_sv_ratio
 
 
-def _task_spearman(model, tokenizer, device, hf_path, batch_size=64, max_length=128) -> float:
+def _task_spearman(model, tokenizer, device, hf_path, batch_size=64, max_length=128,
+                   pooling="last") -> float:
     ds = load_dataset(hf_path, split="test")
     s1, s2, scores = list(ds["sentence1"]), list(ds["sentence2"]), list(ds["score"])
-    e1 = embed_sentences(model, tokenizer, s1, device, batch_size, max_length)
-    e2 = embed_sentences(model, tokenizer, s2, device, batch_size, max_length)
+    e1 = embed_sentences(model, tokenizer, s1, device, batch_size, max_length, pooling=pooling)
+    e2 = embed_sentences(model, tokenizer, s2, device, batch_size, max_length, pooling=pooling)
     cos = F.cosine_similarity(e1, e2, dim=-1).numpy()
     corr, _ = spearmanr(cos, scores)
     return float(corr)
 
 
-def sts_suite_spearman(model, tokenizer, device, batch_size=64, max_length=128):
+def sts_suite_spearman(model, tokenizer, device, batch_size=64, max_length=128, pooling="last"):
     """METHOD.md §5 최종 평가: SimCSE 7-task(STS12-16, STSBenchmark, SICK-R) Spearman + 평균."""
     scores = {
-        name: _task_spearman(model, tokenizer, device, path, batch_size, max_length)
+        name: _task_spearman(model, tokenizer, device, path, batch_size, max_length, pooling=pooling)
         for name, path in STS_SUITE.items()
     }
     scores["avg_7task"] = sum(scores.values()) / len(scores)
