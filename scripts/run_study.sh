@@ -25,7 +25,11 @@ TARGET_TRIALS="${TARGET_TRIALS:-60}"
 MAX_STEPS="${MAX_STEPS:-1500}"
 SPACE="${SPACE:-r5_schedules_full}"
 MAX_RESTARTS="${MAX_RESTARTS:-20}"
-N_JOBS=2
+N_JOBS="${N_JOBS:-2}"
+# GPU 선택 임계값. 기본값은 "진짜 유휴한 GPU만" 이지만, 서버가 계속 붐벼서 한 trial도 못 도는
+# 상황에서는 MAX_UTIL을 올려 남의 작업과 SM을 나눠 쓰도록 완화할 수 있다(사용자 판단 사항).
+MAX_UTIL="${MAX_UTIL:-30}"
+MIN_FREE_MIB="${MIN_FREE_MIB:-25000}"
 # 절대 쓰지 않을 GPU 소유자 (사용자 지시: 팀원/타 연구실 GPU 회피)
 BLOCKED_OWNERS="gs25009|gs25049"
 
@@ -78,12 +82,13 @@ log "study 이름: $STUDY_NAME (SQLite 재개 가능)"
 
 # ---------- 3. 안전한 유휴 GPU 2개 선택 ----------
 pick_gpus() {
-  uv run python - <<'PY'
+  MAX_UTIL="$MAX_UTIL" MIN_FREE_MIB="$MIN_FREE_MIB" N_JOBS="$N_JOBS" uv run python - <<'PY'
 import subprocess, re
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout
 # GPU별 (uuid -> index, 여유메모리)
-MIN_FREE_MIB = 25000   # 우리 run 1개가 ~8GB - 여유를 두고 남의 작업과 충돌하지 않을 선
-MAX_UTIL = 30          # 여유 메모리만 보면 98% 점유 중인 GPU를 "여유 있다"고 고르게 된다
+import os
+MIN_FREE_MIB = int(os.environ["MIN_FREE_MIB"])  # 우리 run 1개가 ~8GB - 남의 작업과 충돌하지 않을 선
+MAX_UTIL = int(os.environ["MAX_UTIL"])          # 여유 메모리만 보면 98% 점유 GPU를 "여유 있다"고 고른다
 gpus = {}
 for line in sh("nvidia-smi --query-gpu=index,uuid,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits").strip().splitlines():
     idx, uuid, used, total, util = [x.strip() for x in line.split(",")]
@@ -99,7 +104,7 @@ for line in sh("nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,nohead
 ok = [g for g in gpus.values()
       if not g["blocked"] and g["util"] < MAX_UTIL and g["free"] > MIN_FREE_MIB]
 ok.sort(key=lambda g: (g["util"], -g["free"]))   # 가장 한가한 것 우선
-print(",".join(str(g["index"]) for g in ok[:2]))
+print(",".join(str(g["index"]) for g in ok[:int(os.environ.get("N_JOBS", "2"))]))
 PY
 }
 
@@ -128,7 +133,7 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
 
   GPUS="$(pick_gpus | tail -1)"
   if [[ -z "$GPUS" ]]; then
-    log "진짜 유휴인 GPU가 없음 (util<30% & 여유>25GB 조건) - 5분 후 재시도"
+    log "조건을 만족하는 GPU 없음 (util<${MAX_UTIL}% & 여유>${MIN_FREE_MIB}MiB) - 5분 후 재시도"
     sleep 300
     continue
   fi
