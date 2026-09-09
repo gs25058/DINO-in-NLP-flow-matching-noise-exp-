@@ -1,5 +1,8 @@
 # 데이터/캐시 (prepare_data.py로 재생성 가능)
+# 'data/'는 디렉터리만 걸러낸다 - worktree에서 원본 data를 심볼릭 링크로 걸면
+# 그건 파일 취급이라 통과해 버린다. '/data'로 이름 자체를 무시한다.
 data/
+/data
 scratch/
 .hf_home/
 .uv_cache/
