@@ -38,6 +38,7 @@ class DINOHead(nn.Module):
 
     def __init__(self, in_dim: int, bottleneck_dim: int, logit_dim: int):
         super().__init__()
+        self.dims = (in_dim, bottleneck_dim, logit_dim)
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, in_dim),
             nn.GELU(),
@@ -74,26 +75,32 @@ class DinoTextModel(nn.Module):
         (centering-uniform-push 브랜치, embed_uniform_push_lr 실험용). None이면(기본) 기존과
         완전히 동일 - 기존 config 재현성 유지.
 
-        pooling: "last"(기본, 기존과 동일) | "first_last" - 평가 전용 소급 재채점(evaluate.py)
-        용. 첫 층(embedding 출력)과 마지막 층 hidden state를 평균한 뒤 mean pooling(BERT-flow류
-        anisotropy 완화 트릭). 학습 루프는 이 인자를 넘기지 않으므로 항상 "last" - 재현성 유지."""
+        pooling: "last"(기본, 기존과 동일) | "first_last" | "cls" - 뒤의 둘은 평가 전용
+        (evaluate.py 소급 재채점, scripts/compare_simcse.py). "first_last"는 첫 층(embedding
+        출력)과 마지막 층 hidden state를 평균한 뒤 mean pooling(BERT-flow류 anisotropy 완화
+        트릭). "cls"는 마지막 층의 [CLS] 토큰만 쓴다 - SimCSE 비지도판 공식 평가 방식
+        (cls_before_pooler; MLP pooler는 우리가 backbone만 싣기 때문에 자연히 제외된다).
+        학습 루프는 이 인자를 넘기지 않으므로 항상 "last" - 재현성 유지."""
         if pooling == "first_last":
             out = self.backbone(
                 inputs_embeds=inputs_embeds, attention_mask=attention_mask, output_hidden_states=True
             )
             hidden = out.last_hidden_state
             pool_input = (out.hidden_states[0] + out.hidden_states[-1]) / 2
-        elif pooling == "last":
+        elif pooling in ("last", "cls"):
             hidden = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
             pool_input = hidden
         else:
             raise ValueError(f"unknown pooling: {pooling}")
-        pooled = masked_mean_pool(pool_input, attention_mask)
+        # cls는 mask 평균 대신 첫 토큰만 취한다(그 외 경로는 기존과 완전히 동일).
+        pooled = pool_input[:, 0] if pooling == "cls" else masked_mean_pool(pool_input, attention_mask)
         if embed_push is not None:
             pooled = pooled + embed_push
         embedding = F.normalize(pooled, p=2, dim=-1)  # Final Embedding (평가/rank 지표)
         logits = self.head(pooled)                     # DINO loss 전용
-        return embedding, logits, hidden                # hidden: velocity head(§4.2, R4)용 토큰별 출력(항상 last)
+        # pooled(정규화 전)는 r10 BYOL식 predictor 입력용으로 추가한 4번째 반환값이다.
+        # 기존 호출부는 앞 3개만 언패킹하므로 동작은 그대로다.
+        return embedding, logits, hidden, pooled       # hidden: velocity head(§4.2, R4)용 토큰별 출력(항상 last)
 
 
 class EMATeacher:

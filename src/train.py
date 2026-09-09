@@ -26,7 +26,8 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
-from src.evaluate import effective_rank_metrics, embed_sentences, sts_b_dev_metrics, sts_b_dev_spearman
+from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
+                          sts_b_dev_metrics_by_space, sts_b_dev_spearman)
 from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
@@ -250,6 +251,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     batch_size = cfg["train"]["batch_size"]
     log_every = cfg["eval"]["log_every_steps"]
     eval_every = cfg["eval"]["every_steps"]
+    # 평가할 표현 공간(evaluate.EVAL_SPACES). Final Embedding 외에 DINO head를 통과한 벡터도
+    # 함께 재는 것이 기본값이다 - backbone forward를 공유하므로 평가 시간은 거의 그대로다.
+    # "embedding"은 주 지표(무접미사 로그 키)라 빠져 있어도 항상 맨 앞에 넣는다.
+    eval_spaces = tuple(cfg["eval"].get("spaces", EVAL_SPACES))
+    if "embedding" not in eval_spaces:
+        eval_spaces = ("embedding",) + eval_spaces
     n_pairs = cfg["eval"]["batch_kl_pairs"]
 
     # --- Part B 진단 플래그 (전부 기본 off) ---
@@ -300,7 +307,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         views = aug(token_embeds, special_mask, step)
 
         with torch.no_grad():
-            t_embedding, t_logits, _ = teacher(
+            t_embedding, t_logits, *_ = teacher(
                 inputs_embeds=views.teacher_embeds, attention_mask=attention_mask,
                 embed_push=embed_uniform_push.push,
             )
@@ -313,7 +320,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         cov_iso_mean_terms = []
         cov_iso_cov_terms = []
         for k, s_embeds in enumerate(views.student_embeds):
-            s_embedding, s_logits, s_hidden = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
@@ -438,7 +445,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
         if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
-            sts, alignment, uniformity = sts_b_dev_metrics(student, tokenizer, device)
+            space_metrics = sts_b_dev_metrics_by_space(student, tokenizer, device, eval_spaces)
+            sts, alignment, uniformity = space_metrics["embedding"]
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
             eval_log = {
                 "sts_b_dev_spearman": sts, "effective_rank": eff_rank, "max_sv_ratio": max_sv,
@@ -448,6 +456,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 f"[step {step}] EVAL sts_b_dev={sts:.4f} eff_rank={eff_rank:.2f} max_sv_ratio={max_sv:.4f} "
                 f"alignment={alignment:.4f} uniformity={uniformity:.4f}"
             )
+            # head 통과 후 공간들은 접미사를 붙여 따로 기록한다(무접미사 키는 Final Embedding 고정).
+            for space in eval_spaces:
+                if space == "embedding":
+                    continue
+                sp_sts, sp_align, sp_unif = space_metrics[space]
+                eval_log[f"sts_b_dev_spearman_{space}"] = sp_sts
+                eval_log[f"alignment_{space}"] = sp_align
+                eval_log[f"uniformity_{space}"] = sp_unif
+                eval_msg += f" | {space}: sts={sp_sts:.4f} align={sp_align:.4f} unif={sp_unif:.4f}"
 
             if diag_teacher_eval:
                 teacher_sts = sts_b_dev_spearman(teacher.model, tokenizer, device)
