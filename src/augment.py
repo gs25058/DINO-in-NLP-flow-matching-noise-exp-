@@ -43,7 +43,8 @@ class FlowNoiseAug:
         return self.t_start + (self.t_max - self.t_start) * frac
 
     def __call__(self, token_embeds: torch.Tensor,
-                 special_mask: torch.Tensor, step: int) -> NoiseViews:
+                 special_mask: torch.Tensor, step: int,
+                 t_range: tuple[float, float] | None = None) -> NoiseViews:
         """token_embeds: word embedding lookup 출력 [B, L, D] (위치 임베딩 합산 전).
         special_mask: [B, L] bool, True = CLS/SEP/pad (노이즈 제외).
 
@@ -70,10 +71,12 @@ class FlowNoiseAug:
         x_hat = (token_embeds - mu) / sigma
         keep = special_mask.unsqueeze(-1)  # [B, L, 1]
 
-        t_hi_now = self.t_hi(step)
+        # t_range를 주면 curriculum(t_lo, t_hi(step)) 대신 그 범위를 쓴다 - r10 난이도 제어기가
+        # 매 step 갱신한 [t_ctrl-jitter, t_ctrl+jitter]를 넘긴다. None이면 기존 동작(bit-identical).
+        t_lo_now, t_hi_now = (self.t_lo, self.t_hi(step)) if t_range is None else t_range
 
         def sample_t() -> torch.Tensor:
-            return self.t_lo + (t_hi_now - self.t_lo) * torch.rand(B, device=device, dtype=dtype)
+            return t_lo_now + (t_hi_now - t_lo_now) * torch.rand(B, device=device, dtype=dtype)
 
         def make_view(t_vec: torch.Tensor, eps: torch.Tensor | None = None):
             if eps is None:

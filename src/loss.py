@@ -258,3 +258,81 @@ def velocity_loss(
     keep = (~special_mask).to(per_token.dtype)
     denom = keep.sum().clamp_min(1.0)
     return (per_token * keep).sum() / denom
+
+
+class Predictor(nn.Module):
+    """r10 BYOL식 predictor q: d -> hidden -> d (LayerNorm + GELU, BN 없음).
+
+    student에만 붙고 EMA 대상이 아니다(BYOL 관례). 체크포인트에는 포함한다.
+    입력은 pooled(정규화 전), 출력은 호출부에서 L2 정규화해 쓴다.
+    """
+
+    def __init__(self, dim: int, hidden: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Linear(hidden, dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+    @torch.no_grad()
+    def top1_eig_frac(self) -> float:
+        """첫 선형층 가중치의 최대 특이값^2 / 특이값^2 합 (Tian et al. 붕괴 메커니즘 진단)."""
+        sv = torch.linalg.svdvals(self.net[0].weight.detach().float())
+        p = sv ** 2
+        return float(p[0] / p.sum().clamp_min(1e-12))
+
+
+def align_loss(pred_list: list[torch.Tensor], z_teacher: torch.Tensor,
+               cos_raw_list: list[torch.Tensor], focal_gamma: float):
+    """L_align = mean_{i,v} w_iv (1 - cos(q(z_s), sg(z_t))).
+
+    pred_list: 뷰별 q 출력(L2 정규화 전). z_teacher: teacher anchor pooled, L2 정규화, detached.
+    cos_raw_list: predictor 없는 원 코사인(detach) - focal 가중치 계산용.
+    focal_gamma=0이면 w=1(균등)이라 기존 BYOL 항과 동일하다.
+    반환 (L_align_raw, L_align_weighted, aux).
+    """
+    raw_terms, w_terms = [], []
+    w_max = 0.0
+    for q_out, cos_raw in zip(pred_list, cos_raw_list):
+        cos_pred = F.cosine_similarity(F.normalize(q_out, p=2, dim=-1), z_teacher, dim=-1)
+        d = 1.0 - cos_pred                       # [B]
+        raw_terms.append(d.mean())
+        if focal_gamma > 0:
+            w = (1.0 - cos_raw).clamp_min(0).pow(focal_gamma)
+            w = w / w.mean().clamp_min(1e-12)    # 배치 평균 1로 정규화
+            w_max = max(w_max, float(w.max()))
+            w_terms.append((w * d).mean())
+        else:
+            w_max = max(w_max, 1.0)
+            w_terms.append(d.mean())
+    l_raw = torch.stack(raw_terms).mean()
+    l_w = torch.stack(w_terms).mean()
+    return l_raw, l_w, {"focal_w_max": w_max}
+
+
+class TCtrl:
+    """r10 노이즈 t 난이도 제어기.
+
+    배치의 원 pooled 코사인 c_bar가 밴드를 벗어나면 t_ctrl을 한 스텝 움직여 positive 난이도를
+    유지한다(자기 쌍 positive가 공짜가 되어 조기 포화하는 것을 막는 목적).
+    t_lo/t_hi를 대체하므로 augment.__call__에 [t_ctrl-jitter, t_ctrl+jitter]를 넘긴다.
+    """
+
+    def __init__(self, band_lo, band_hi, step_size, jitter, t_min, t_max, t_init):
+        self.band_lo, self.band_hi = band_lo, band_hi
+        self.step_size, self.jitter = step_size, jitter
+        self.t_min, self.t_max = t_min, t_max
+        self.t_ctrl = t_init
+
+    def update(self, c_bar: float) -> None:
+        if c_bar > self.band_hi:                 # 너무 쉬움 -> 노이즈 키움
+            self.t_ctrl = min(self.t_ctrl + self.step_size, self.t_max)
+        elif c_bar < self.band_lo:               # 너무 어려움 -> 줄임
+            self.t_ctrl = max(self.t_ctrl - self.step_size, self.t_min)
+
+    def range(self) -> tuple[float, float]:
+        lo = max(self.t_min, self.t_ctrl - self.jitter)
+        hi = min(self.t_max, self.t_ctrl + self.jitter)
+        return lo, hi

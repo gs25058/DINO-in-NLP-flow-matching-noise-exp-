@@ -28,7 +28,8 @@ from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
-from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
+from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, Predictor, TCtrl,
+                      align_loss, batch_kl_diagnostic, koleo_loss, velocity_loss)
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
@@ -88,7 +89,8 @@ def _is_no_decay_param(name: str) -> bool:
 
 
 def build_param_groups(
-    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool
+    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool,
+    predictor=None,
 ) -> list[dict]:
     """backbone/head(+velocity_head) x decay/no-decay 4-way(또는 그 이하) param group 구성.
 
@@ -99,6 +101,9 @@ def build_param_groups(
     head_named = list(student.head.named_parameters())
     if velocity_head is not None:
         head_named += list(velocity_head.named_parameters())
+    if predictor is not None:
+        # r10 predictor는 head 그룹 lr을 쓴다(명세). None이면 기존과 완전히 동일.
+        head_named += list(predictor.named_parameters())
 
     if not exclude_ln_bias_wd and head_lr == lr:
         all_params = [p for _, p in backbone_named + head_named]
@@ -202,6 +207,23 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     cov_iso_lambda = cfg["loss"].get("cov_iso_lambda", 0.0)
     cov_ema_momentum = cfg["loss"].get("cov_ema_momentum", 0.99)
     cov_iso_start_step = cfg["loss"].get("cov_iso_start_step", 50)
+
+    # r10: BYOL식 pooled alignment 항 + t 난이도 제어 + 뷰 간 일관성. 미지정 시 전부 off.
+    align_cfg = cfg.get("align", {})
+    align_enabled = align_cfg.get("enabled", False)
+    align_lam = align_cfg.get("lam", 0.5)
+    align_focal_gamma = align_cfg.get("focal_gamma", 0.0)
+    predictor = None
+    tctrl_cfg = cfg.get("t_ctrl", {})
+    tctrl = TCtrl(
+        tctrl_cfg.get("band_lo", 0.85), tctrl_cfg.get("band_hi", 0.90),
+        tctrl_cfg.get("step_size", 0.005), tctrl_cfg.get("jitter", 0.1),
+        tctrl_cfg.get("t_min", 0.2), tctrl_cfg.get("t_max", 0.9), tctrl_cfg.get("t_init", 0.5),
+    ) if tctrl_cfg.get("enabled", False) else None
+    # 제어기 시작 step: pos_cos_raw가 초반 U자(0.95->0.54->0.88)를 그리므로 step 0부터 켜면
+    # 하강 구간을 "너무 어렵다"로 읽어 t를 하한까지 밀어버린다(실측). 그 전까지는 config의
+    # 원래 t 범위(t_range=None)를 그대로 써서 r10a와 연속이 되게 한다.
+    tctrl_start = tctrl_cfg.get("start_step", 0)
     cov_iso_penalty = None
     if cov_iso_lambda > 0:
         cov_iso_penalty = CovIsoPenalty(student.backbone.config.hidden_size, cov_ema_momentum).to(device)
@@ -213,11 +235,16 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         ).to(device)
 
+    if align_enabled:
+        predictor = Predictor(student.backbone.config.hidden_size,
+                              align_cfg.get("predictor_hidden", 3072)).to(device)
+
     head_lr = cfg["train"].get("head_lr", cfg["train"]["lr"])
     exclude_ln_bias_wd = cfg["train"].get("exclude_ln_bias_wd", False)
     grad_clip = cfg["train"].get("grad_clip")
     param_groups = build_param_groups(
-        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd
+        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd,
+        predictor=predictor,
     )
     optimizer = torch.optim.AdamW(param_groups)
     all_trainable_params = [p for g in param_groups for p in g["params"]]
@@ -286,6 +313,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
     student.train()
     for step in range(max_steps):
+
         batch_sentences = random.sample(sentences, batch_size)
         enc = tokenizer(
             batch_sentences, truncation=True, max_length=max_tokens, padding=True,
@@ -304,24 +332,29 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         koleo_lambda = resolve_koleo_lambda(step, koleo_lambda_max, koleo_hold_steps, koleo_decay_steps, koleo_min_ratio)
 
         token_embeds = student.get_input_embeddings()(input_ids)
-        views = aug(token_embeds, special_mask, step)
+        t_range = tctrl.range() if (tctrl is not None and step >= tctrl_start) else None
+        views = aug(token_embeds, special_mask, step, t_range=t_range)
 
         with torch.no_grad():
-            t_embedding, t_logits, *_ = teacher(
+            t_embedding, t_logits, _, t_pooled = teacher(
                 inputs_embeds=views.teacher_embeds, attention_mask=attention_mask,
                 embed_push=embed_uniform_push.push,
             )
         embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
+        student_pooled = []      # r10 predictor 입력(정규화 전), student_embeds는 원 코사인용
+        student_embeds = []
         vel_losses = []
         koleo_losses = []
         cov_iso_losses = []
         cov_iso_mean_terms = []
         cov_iso_cov_terms = []
         for k, s_embeds in enumerate(views.student_embeds):
-            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            s_embedding, s_logits, s_hidden, s_pooled = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
             student_logits.append(s_logits)
+            student_pooled.append(s_pooled)
+            student_embeds.append(s_embedding)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
@@ -352,6 +385,35 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             aux["L_iso"] = l_iso_total.detach()
             aux["L_iso_mean"] = torch.stack(cov_iso_mean_terms).mean()
             aux["L_iso_cov"] = torch.stack(cov_iso_cov_terms).mean()
+
+        if align_enabled:
+            z_t_sg = t_embedding.detach()                       # teacher anchor pooled, L2 정규화됨
+            with torch.no_grad():                               # 원 코사인(predictor 없음): 제어기·focal용
+                cos_raw_list = [F.cosine_similarity(z_s, z_t_sg, dim=-1) for z_s in student_embeds]
+                c_bar = float(torch.stack(cos_raw_list).mean())
+            pred_list = [predictor(sp) for sp in student_pooled]
+            l_align_raw, l_align_w, align_aux = align_loss(
+                pred_list, z_t_sg, cos_raw_list, align_focal_gamma)
+            total_loss = total_loss + align_lam * l_align_w
+            with torch.no_grad():
+                cos_pred = torch.stack([
+                    F.cosine_similarity(F.normalize(q, p=2, dim=-1), z_t_sg, dim=-1)
+                    for q in pred_list]).mean()
+            aux["L_align"] = l_align_raw.detach()
+            aux["L_align_w"] = l_align_w.detach()
+            aux["pos_cos_raw"] = c_bar
+            aux["pos_cos_pred"] = float(cos_pred)
+            aux.update(align_aux)
+
+
+            if tctrl is not None and step >= tctrl_start:
+                tctrl.update(c_bar)                             # 다음 step의 t 범위에 반영
+            t_all = torch.cat(views.t_students)
+            aux["t_ctrl"] = tctrl.t_ctrl if tctrl else float("nan")
+            aux["t_batch_mean"] = float(t_all.mean())
+            aux["t_batch_std"] = float(t_all.std())
+            if step % 100 == 0:
+                aux["pred_eig_top1_frac"] = predictor.top1_eig_frac()
 
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
@@ -410,6 +472,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 log["L_vel"] = aux["L_vel"].item()
             if "L_koleo" in aux:
                 log["L_koleo"] = aux["L_koleo"].item()
+            if align_enabled:
+                log["L_align"] = aux["L_align"].item()
+                log["L_align_w"] = aux["L_align_w"].item()
+                for k in ("pos_cos_raw", "pos_cos_pred", "focal_w_max",
+                          "t_ctrl", "t_batch_mean", "t_batch_std"):
+                    log[k] = aux[k]
+                if "pred_eig_top1_frac" in aux:
+                    log["pred_eig_top1_frac"] = aux["pred_eig_top1_frac"]
             if koleo_lambda_max > 0:
                 log["koleo_lambda"] = koleo_lambda
             if "L_iso" in aux:
@@ -487,7 +557,9 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     if cfg["train"].get("save_checkpoint", True):
         ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        ckpt_extra = {"predictor": predictor.state_dict()} if predictor is not None else {}
         torch.save({
+            **ckpt_extra,
             "state_dict": student.state_dict(),
             "model_cfg": cfg["model"],
             "teacher_state_dict": teacher.model.state_dict(),
