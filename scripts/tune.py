@@ -112,7 +112,50 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "train.head_lr": ("float", {"low": 1.0e-4, "high": 1.0e-3, "log": True}),
         "train.grad_clip": ("float", {"low": 1.0, "high": 6.0}),
     },
+    # 노이즈 분포 자체. 이 프로젝트에서 augment.* 는 단 한 번도 탐색된 적이 없다 - 지금까지의
+    # study 4개(146 trial)는 전부 정규화 항(koleo/cov_iso/uniform_push)과 최적화·스케줄
+    # (lr/head_lr/grad_clip/teacher_temp/momentum)만 건드렸다. 정작 CLAUDE.md가 탐색을
+    # 허용한 축("노이즈 관련 신규 하이퍼파라미터만 탐색 대상")이 비어 있었다.
+    #
+    # 챔피언 config의 노이즈 설정은 프로젝트 시작부터 t ~ U(0.35, 0.5) 고정이고
+    # warmup_frac=0.0이라 curriculum(t_start->t_max)은 아예 꺼져 있다 - t_start/t_max가
+    # 죽은 값이다. 이 범위의 근거는 어디에도 없다.
+    #
+    # r10b의 t 제어기가 "양성 쌍 난이도가 일정하게 유지되는 t"를 스스로 찾아 0.63에
+    # 평형한 것도 현재 중앙값 0.425가 낮게 잡혔을 가능성을 시사한다(align 항과 교락돼
+    # 있어 강한 증거는 아니다).
+    #
+    # 파라미터화 주의: t ~ U(t_lo, t_hi(step))라 t_lo < t_hi가 항상 성립해야 한다.
+    # t_max/t_start를 독립 샘플링하면 무효 조합이 생기므로, 폭(_t_span)과 비율
+    # (_t_start_frac)로 받아 DERIVED에서 유효한 값으로 환산한다(아래 _derive_flow_noise_t).
+    # 밑줄로 시작하는 키는 config 경로가 아니라 파생용 의사 파라미터다.
+    #
+    # max_steps는 반드시 1500(배포 길이)로 돌릴 것 - warmup_frac이 frac*max_steps라서
+    # 750-step 예산에서는 절대 step이 절반이 되어 결과가 전이되지 않는다(r5_schedules_full
+    # 주석의 전례와 동일한 함정).
+    "flow_noise_t": {
+        "augment.t_lo": ("float", {"low": 0.0, "high": 0.6}),
+        "_t_span": ("float", {"low": 0.05, "high": 0.6}),      # t_max = t_lo + span (1.0 상한 clip)
+        "_t_start_frac": ("float", {"low": 0.1, "high": 1.0}),  # 1.0이면 램프 없음(t_start == t_max)
+        "augment.warmup_frac": ("float", {"low": 0.0, "high": 0.6}),
+        "augment.num_student_views": ("int", {"low": 2, "high": 4}),
+    },
 }
+
+
+def _derive_flow_noise_t(cfg: dict, pseudo: dict) -> None:
+    """폭/비율로 받은 의사 파라미터를 t_max/t_start로 환산한다.
+
+    t_lo < t_start <= t_max <= 1.0 이 구성상 보장되므로 무효 trial이 생기지 않는다.
+    _t_start_frac=1.0이면 t_start == t_max라 curriculum이 사실상 꺼진 상태(현 챔피언과 동일)."""
+    t_lo = cfg["augment"]["t_lo"]
+    t_max = min(1.0, t_lo + pseudo["_t_span"])
+    cfg["augment"]["t_max"] = t_max
+    cfg["augment"]["t_start"] = t_lo + (t_max - t_lo) * pseudo["_t_start_frac"]
+
+
+#: space_name -> 파생 파라미터 환산 함수. 없는 space는 의사 파라미터도 없다.
+DERIVED = {"flow_noise_t": _derive_flow_noise_t}
 
 
 def set_by_path(cfg: dict, dotted: str, value) -> None:
@@ -162,6 +205,7 @@ class GpuPool:
 def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: int,
               seed: int, gpu_pool: GpuPool, timeout: int, study_name: str) -> float:
     cfg = copy.deepcopy(base_cfg)
+    pseudo: dict = {}
     for dotted, (kind, kwargs) in SEARCH_SPACES[space_name].items():
         if kind == "float":
             value = trial.suggest_float(dotted, **kwargs)
@@ -171,7 +215,12 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
             value = trial.suggest_categorical(dotted, **kwargs)
         else:
             raise ValueError(f"unknown suggest kind: {kind}")
-        set_by_path(cfg, dotted, value)
+        if dotted.startswith("_"):
+            pseudo[dotted] = value      # config 경로가 아닌 파생용 값
+        else:
+            set_by_path(cfg, dotted, value)
+    if space_name in DERIVED:
+        DERIVED[space_name](cfg, pseudo)
 
     # study_name(base config stem + search space)을 그대로 재사용한다 - base_cfg['run_name']만
     # 쓰면 어떤 search space를 탐색 중인지(예: koleo_lambda)가 trial 이름에서 사라진다.
