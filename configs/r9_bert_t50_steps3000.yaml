@@ -1,0 +1,33 @@
+# R9 대조군: r8(스케줄 튜닝 best, trial 50)을 그대로 3000 step으로 연장한다.
+# 주기적 DINO head 리셋(r9_bert_t50_steps3000_headreinit1000)의 비교 기준이며, 두 config의
+# 차이는 오직 train.head_reinit_every_steps 하나다 (CLAUDE.md 구현 원칙 1).
+#
+# frac 기반 스케줄 3개는 값을 절반으로 낮춰 r8(1500 step)과 **절대 step 수**를 보존한다.
+# 이 값들은 1500 step 예산에서 튜닝된 것이고, 특히 LR warmup 길이가 지배적인 축이었으므로
+# (results/analysis/tune_r7_bert_coviso_optuna_t35_r5_schedules_full_trials.csv: 상관 -0.82)
+# frac을 그대로 두면 warmup이 77 -> 155 step으로 2배가 되어 "길게 학습한 효과"와 교락된다.
+#   warmup_frac              0.0517 * 1500 = 77  step  -> 0.02585 * 3000 = 77  step
+#   momentum_ramp_frac       0.4077 * 1500 = 611 step  -> 0.20386 * 3000 = 611 step
+#   teacher_temp_warmup_frac 0.0790 * 1500 = 118 step  -> 0.03948 * 3000 = 118 step
+# cov_iso_start_step(56)은 원래 절대 step이라 그대로 둔다.
+# 유일하게 늘어나는 것은 cosine LR decay의 지평(1500 -> 3000)으로, 이건 "더 길게 학습한다"의
+# 정의 그 자체라 보정 대상이 아니다.
+#
+# eval.every_steps는 250 -> 125로 좁힌다: 리셋 직후 회복 곡선을 봐야 하는 실험이라
+# 250 step 간격이면 1000 step 리셋과 다음 관측 사이가 너무 성기다. 1500/3000처럼 기존
+# 비교 지점은 125의 배수라 그대로 남는다.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+
+run_name: r9_bert_t50_steps3000
+
+train:
+  max_steps: 3000
+  warmup_frac: 0.02585442699695155
+  momentum_ramp_frac: 0.20385575318457475
+  head_reinit_every_steps: 0
+
+loss:
+  teacher_temp_warmup_frac: 0.0394838610929029
+
+eval:
+  every_steps: 125

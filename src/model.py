@@ -48,6 +48,18 @@ class DINOHead(nn.Module):
             nn.Linear(bottleneck_dim, logit_dim, bias=False)
         )
 
+    @torch.no_grad()
+    def reset_parameters(self) -> None:
+        """head 전체를 최초 생성 시와 같은 분포로 재초기화한다(R9 주기적 head 리셋).
+
+        expand는 weight_norm parametrization이 걸려 있어 Linear.reset_parameters()를
+        그대로 부를 수 없다(계산된 .weight는 leaf가 아니라 in-place 초기화가 원본
+        original0/original1에 반영되지 않는다). 그래서 같은 인자로 새 DINOHead를 만들어
+        state_dict를 그대로 싣는다 - "새로 만든 모델의 head"와 분포가 같음이 구성상 보장된다.
+        """
+        fresh = DINOHead(*self.dims).to(next(self.parameters()).device)
+        self.load_state_dict(fresh.state_dict())
+
     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
         x = self.mlp(pooled)
         x = F.normalize(x, p=2, dim=-1)

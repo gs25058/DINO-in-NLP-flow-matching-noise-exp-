@@ -1,0 +1,29 @@
+# R9 처치군 B: 1000 step마다 **student head만** 난수 재초기화, teacher head는 학습된 상태 유지.
+# 대조군 r9_bert_t50_steps3000.yaml과의 차이는 head_reinit_* 두 줄뿐이다.
+#
+# 왜 이 변형인가 (처치군 A = sync 리셋의 실측에서 나온 동기):
+#   sync 리셋은 student와 teacher head를 같은 난수로 동기화해 되돌리기 때문에, 리셋 직후
+#   두 logit이 거의 같아져 KL(p_t||p_s)가 공짜로 만족된다. 실측(r9_..._headreinit1000_s42,
+#   step 1000 리셋): KL 0.0039 -> 0.0075로 1.9배에 그쳤고 step 1200에는 0.0049로 원복.
+#   step 0의 KL이 0.127이었던 것에 비하면 "다시 배우라"는 압력이 loss에 거의 실리지 않았다.
+#   head는 백지가 됐지만 그 사실이 학습 신호로 전달되지 않은 셈이다.
+#
+#   student만 리셋하면 학습된 teacher가 이미 만들어 놓은 prototype 배치를 난수 student가
+#   처음부터 다시 맞춰야 한다. KL이 크게 튀고, 그 재학습 gradient가 backbone으로 흘러든다.
+#   "백본이 head 좌표계에 과적합되는가"라는 원 질문에 실제로 압력을 거는 쪽은 이 변형이다.
+#
+# center(=teacher logit의 EMA)는 teacher head와 한 몸이라 함께 보존한다 - teacher를 살려두면서
+# center만 0으로 만들면 살아 있는 teacher의 centering(붕괴 방지 기제)을 망가뜨린다.
+# head의 optimizer state(Adam 모멘트/step 카운터)는 sync와 동일하게 비운다.
+#
+# 주의: 평가 지표(STS/eff_rank/alignment/uniformity)는 backbone mean-pooled 임베딩만 쓰고
+# head를 통과하지 않으므로 리셋 순간에 지표가 튀지 않는다. 효과는 이후 구간 곡선에서만 보인다.
+# 반대로 학습 로그의 KL_pt_ps/grad_norm_total은 리셋 직후 확실히 튀는 것이 정상이며,
+# 이게 sync 변형과 갈리는 지점이다.
+extends: r9_bert_t50_steps3000.yaml
+
+run_name: r9_bert_t50_steps3000_headreinit1000_studentonly
+
+train:
+  head_reinit_every_steps: 1000
+  head_reinit_scope: student_only

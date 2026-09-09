@@ -139,6 +139,36 @@ def build_augment(cfg: dict) -> FlowNoiseAug:
     )
 
 
+def reinit_dino_head(student, teacher, optimizer, dino_loss, scope: str = "sync") -> None:
+    """DINO head를 주기적으로 재초기화한다 (config train.head_reinit_every_steps > 0일 때만).
+
+    scope로 "무엇까지 되돌리는가"가 갈린다. backbone / cov_iso EMA(임베딩 공간 통계) /
+    augment는 어느 쪽에서도 건드리지 않는다 - 리셋 대상은 head 계열 상태뿐이다.
+
+    scope="sync" (기본): student head와 teacher head를 같은 난수로 동기 리셋하고 center도
+      0으로 되돌린다. step 0(teacher=deepcopy(student), center=0) 상태의 완전한 복원이다.
+      단, 리셋 직후 teacher와 student의 logit이 거의 같아져 KL(p_t||p_s)가 공짜로 만족되므로
+      "다시 배우라"는 압력이 loss에 거의 실리지 않는다(실측: KL 0.0039 -> 0.0075, step 0의
+      0.127에 한참 못 미침).
+
+    scope="student_only": student head만 난수로 되돌리고 teacher head는 학습된 상태로 둔다.
+      학습된 teacher가 만들어 놓은 prototype 배치를 난수 student가 처음부터 다시 맞춰야 하므로
+      리셋 직후 KL이 크게 튀고, 그 재학습 gradient가 backbone으로 흘러든다.
+      center는 teacher logit의 EMA라 teacher head와 한 몸이다 - teacher를 남기면서 center만
+      0으로 만들면 살아 있는 teacher의 centering(붕괴 방지 기제)을 망가뜨리므로 함께 보존한다.
+
+    optimizer state(head 파라미터의 Adam 1/2차 모멘트와 step 카운터)는 두 scope 모두에서
+    제거한다: 사라진 prototype에 대한 모멘텀이 남으면 난수 head를 첫 스텝부터 밀어버린다.
+    """
+    assert scope in ("sync", "student_only"), f"unknown head_reinit_scope: {scope}"
+    student.head.reset_parameters()
+    for p in student.head.parameters():
+        optimizer.state.pop(p, None)
+    if scope == "sync":
+        teacher.model.head.load_state_dict(student.head.state_dict())
+        dino_loss.center.zero_()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -250,6 +280,10 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     max_tokens = cfg["data"]["max_tokens"]
     batch_size = cfg["train"]["batch_size"]
     log_every = cfg["eval"]["log_every_steps"]
+    # R9: head_reinit_every_steps step마다 DINO head를 난수 재초기화(0/미지정이면 off =
+    # 기존 config와 완전히 동일). scope는 reinit_dino_head docstring 참고.
+    head_reinit_every = cfg["train"].get("head_reinit_every_steps", 0)
+    head_reinit_scope = cfg["train"].get("head_reinit_scope", "sync")
     eval_every = cfg["eval"]["every_steps"]
     # 평가할 표현 공간(evaluate.EVAL_SPACES). Final Embedding 외에 DINO head를 통과한 벡터도
     # 함께 재는 것이 기본값이다 - backbone forward를 공유하므로 평가 시간은 거의 그대로다.
@@ -304,6 +338,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         koleo_lambda = resolve_koleo_lambda(step, koleo_lambda_max, koleo_hold_steps, koleo_decay_steps, koleo_min_ratio)
 
         token_embeds = student.get_input_embeddings()(input_ids)
+        # step 0은 이미 난수 head라 건너뛴다 - 첫 리셋은 step==head_reinit_every.
+        if head_reinit_every > 0 and step > 0 and step % head_reinit_every == 0:
+            reinit_dino_head(student, teacher, optimizer, dino_loss, head_reinit_scope)
+            logger.info(f"[step {step}] HEAD REINIT scope={head_reinit_scope}")
+            wandb.log({"head_reinit": 1.0}, step=step)
+            tb_writer.add_scalar("train/head_reinit", 1.0, step)
         views = aug(token_embeds, special_mask, step)
 
         with torch.no_grad():
