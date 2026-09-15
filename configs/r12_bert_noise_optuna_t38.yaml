@@ -1,0 +1,15 @@
+# 노이즈 축 튜닝(study: tune_r8_bert_coviso_sched_optuna_t50_flow_noise_t, 40 trial, 1500-step, space "flow_noise_t")
+# trial #38 승격. 단일 시드(42) sts_b_dev=0.7301 (base r8 s42 = 0.7173).
+# 전체 기록: results/analysis/tune_r8_bert_coviso_sched_optuna_t50_flow_noise_t_trials.csv
+#
+# 핵심 발견: 챔피언의 t 범위 U(0.35, 0.50)은 상한이 낮고 폭이 좁았다.
+# 상위 10 trial이 전부 t_max 0.77~0.88, 폭 0.37~0.60으로 일치한다.
+# warmup_frac은 상위권에서 여전히 ~0 - curriculum은 불필요하다는 기존 결론 유지.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r12_bert_noise_optuna_t38
+augment:
+  t_lo: 0.4074135614455211
+  t_start: 0.5525313285627789
+  t_max: 0.7747999654170319
+  warmup_frac: 0.04530498078872515
+  num_student_views: 3
