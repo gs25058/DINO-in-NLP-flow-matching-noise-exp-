@@ -83,11 +83,16 @@ def main():
 
     cfg = load_config(ROOT / args.config)
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
-    model = DinoTextModel(cfg["model"]["backbone"], cfg["model"]["bottleneck_dim"],
-                          cfg["model"]["logit_dim"]).to(args.device).eval()
+    model = DinoTextModel(cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"],
+                          cfg["model"]["head"]["logit_dim"]).to(args.device).eval()
     if args.checkpoint:
-        sd = torch.load(ROOT / args.checkpoint, map_location=args.device, weights_only=True)
-        model.load_state_dict(sd["student"] if "student" in sd else sd)
+        sd = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
+        # train.py가 저장하는 형식: {"state_dict", "teacher_state_dict", "model_cfg", ...}
+        for key in ("state_dict", "student", "student_state_dict"):
+            if key in sd:
+                sd = sd[key]
+                break
+        model.load_state_dict(sd)
         print(f"체크포인트 로드: {args.checkpoint}")
     else:
         print("체크포인트 없음 - 사전학습 backbone 그대로 측정")

@@ -1,0 +1,30 @@
+# R11-A 폐루프: H(p_t)를 anchor -> anchor-0.066 nats. r11a와 같은 H 도달점, 다른 경로.
+# 설계 좌표를 tau가 아니라 H로 잡는 이유 - logit 스케일이 자라므로 같은 tau가 같은
+# 유효 날카로움을 뜻하지 않는다. 두 arm 결과가 다르면 경로(속도) 의존성이 있다는 뜻이다.
+#
+# gain: 스펙의 0.02는 측정 H(tau) 곡선 기반 시뮬레이션에서 +0.023~0.027 nats 정상오차가
+# 남아 목표에 도달하지 못했다. 0.1/0.3/1.0은 모두 정확히 추종하며, 0.3을 택한 이유는
+# 실제 계통의 지연·잡음에 대한 외란 제거력이고, 안전 한계는 max_step(스텝당 1%)이 준다.
+# tau_min은 0.03 - delta 0.152가 tau≈0.050을 요구하므로 여유를 둔다.
+# 캘리브레이션 근거: scripts/measure_teacher_entropy_vs_tau.py (r12_t35_s42 teacher, 512문장).
+# H(tau): 0.1348->8.9869 / 0.105->8.9712 / 0.085->8.9503 / 0.07->8.9213 / 0.05->8.8346 / 0.03->8.5170
+# 스펙 원값(개루프 0.105/0.085 = -0.016/-0.037 nats, 폐루프 delta 0.3/0.6 = tau 0.030/0.020 필요)은
+# 두 arm이 10~20배 어긋나 비교 불가였고 폐루프는 tau_min=0.05에서 포화해 도달 불가였다.
+# 아래 값은 개루프와 폐루프가 "같은 H 도달점"을 갖도록 맞춘 것이다 - 스펙의 경로 의존성 비교 의도.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r11c_bert_hctrl0.066
+loss:
+  entropy_ctrl: true
+  entropy_ctrl_start_frac: 0.45
+  entropy_ctrl_end_frac: 0.85
+  entropy_ctrl_delta: 0.066
+  entropy_ctrl_gain: 0.3
+  entropy_ctrl_tau_min: 0.03
+  entropy_ctrl_max_step: 0.01
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
+  start_frac: 0.2           # step 300 - 그 전은 기준값(plateau 평균)과 비교 불가(step 0의 batch_KL 0.0222)
+  patience: 3               # 연속 위반 3회 요구 - 단발 노이즈로 중단하지 않는다

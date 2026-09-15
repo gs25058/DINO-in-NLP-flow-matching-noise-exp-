@@ -1,6 +1,6 @@
-# R12-B span cutoff 10% drop. 비특수 토큰 중 연속 span을 attention/pooling 양쪽에서 제외.
-# teacher는 항상 깨끗한 원문을 본다. 배치 내 다른 문장은 관여하지 않으므로 문장 정체성 보존.
-# (선례: Cutoff, Shen et al. 2020 / ConSERT 증강 계열)
+# R12-B 대조군 1: iid 노이즈만 강화 U(0.45, 0.55). pooled 0.9118 - r12b(rho=0.5, 0.9138)와 짝.
+# 구조는 그대로 두고 난이도만 맞췄다. 이 arm이 r12b만큼 개선되면 원인은 구조가 아니라
+# 난이도였다는 뜻이다(P-V3).
 # B0 실측(scripts/measure_view_hardness.py, r12_t35_s42, 512문장) - pooled / 토큰 코사인:
 #   r8 기준 U(0.35,0.50)  0.9429 / 0.8374
 #   iid  U(0.45,0.55)     0.9118 / 0.7709      rho=0.5     0.9138 / 0.8407   <- 쌍 1
@@ -9,15 +9,15 @@
 # 같은 pooled 난이도를 만드는 데 iid는 토큰을 44~72% 더 망가뜨려야 한다. 이 매트릭스는
 # pooled 난이도를 맞춘 쌍으로 구성해 "구조 때문인가 난이도 때문인가"(P-V3)를 직접 가른다.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
-run_name: r12d_bert_cutoff0.1
+run_name: r12a_bert_iid_t0.45-0.55
 augment:
-  cutoff_span_frac: 0.1
-  cutoff_prob: 1.0
-  cutoff_mode: drop
+  t_lo: 0.45
+  t_start: 0.55
+  t_max: 0.55
 collapse_guard:
   enabled: true
   h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
   eff_rank_ref: 305.16
   batch_kl_ref: 0.0620
-  start_frac: 0.2          # step 300 - 그 전 구간은 기준값(plateau 평균)과 비교 불가
-  patience: 3              # 연속 위반 3회 요구 - 단발 노이즈로 중단하지 않는다
+  start_frac: 0.2           # step 300 - 그 전은 기준값(plateau 평균)과 비교 불가(step 0의 batch_KL 0.0222)
+  patience: 3               # 연속 위반 3회 요구 - 단발 노이즈로 중단하지 않는다

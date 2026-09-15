@@ -278,7 +278,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     g_hbar = guard.get("h_p_bar_t_ref", 9.0097)
     g_rank = guard.get("eff_rank_ref", 305.16)
     g_bkl = guard.get("batch_kl_ref", 0.0620)
+    # 기준값은 plateau(step 675~1499) 평균이라 초기 구간에 적용하면 오발동한다 - 실측으로
+    # step 0의 batch_KL은 0.0222로 임계 0.0310 아래이고, step 120~150도 0.036으로 여유가
+    # 17%뿐이다. 그래서 (1) start_frac 이전에는 감시하지 않고, (2) 연속 위반을 요구한다.
+    g_start = int(guard.get("start_frac", 0.2) * max_steps)
+    g_patience = guard.get("patience", 3)
     guard_warned = False
+    guard_strikes = 0
+    last_ok_eval_step = -1      # 중단 보고용 - 감시를 통과한 마지막 평가 step
     last_ok_eval_step = -1      # 중단 보고용 - 감시를 통과한 마지막 평가 step
     momentum_start = cfg["train"].get("momentum_start")
     momentum_end = cfg["train"].get("momentum_end")
@@ -517,15 +524,22 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 tb_writer.add_scalar(f"train/{k}", v, step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
-            if guard_on:
+            if guard_on and step >= g_start:
                 # cov_iso는 응축(rank 붕괴)은 막지만 p_bar_t가 한 점으로 쏠리는 경로는 못 막는다.
-                # 기준값 대비 상대 임계로 판정하고, 중단 시 마지막 정상 평가 step을 남긴다.
                 hbar = log["H_p_bar_t"]
-                if hbar < g_hbar - 0.30 or log["batch_KL"] < g_bkl * 0.5:
-                    why = (f"H_p_bar_t={hbar:.4f} < {g_hbar - 0.30:.4f}" if hbar < g_hbar - 0.30
+                bad_h = hbar < g_hbar - 0.30
+                bad_kl = log["batch_KL"] < g_bkl * 0.5
+                if bad_h or bad_kl:
+                    guard_strikes += 1
+                    why = (f"H_p_bar_t={hbar:.4f} < {g_hbar - 0.30:.4f}" if bad_h
                            else f"batch_KL={log['batch_KL']:.4f} < {g_bkl * 0.5:.4f}")
-                    logger.info(f"[step {step}] COLLAPSE ABORT {why} (마지막 정상 평가 step={last_ok_eval_step})")
-                    break
+                    logger.info(f"[step {step}] COLLAPSE STRIKE {guard_strikes}/{g_patience} {why}")
+                    if guard_strikes >= g_patience:
+                        logger.info(f"[step {step}] COLLAPSE ABORT {why} "
+                                    f"(마지막 정상 평가 step={last_ok_eval_step})")
+                        break
+                else:
+                    guard_strikes = 0        # 연속이 끊기면 초기화 - 단발 노이즈로 중단하지 않는다
                 if not guard_warned and hbar < g_hbar - 0.15:
                     guard_warned = True
                     logger.info(f"[step {step}] COLLAPSE WARN H_p_bar_t={hbar:.4f} < {g_hbar - 0.15:.4f}")
@@ -570,7 +584,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             for k, v in eval_log.items():
                 tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
-            if guard_on:
+            if guard_on and step >= g_start:
                 if eff_rank < g_rank * 0.7:
                     logger.info(f"[step {step}] COLLAPSE ABORT eff_rank={eff_rank:.2f} < {g_rank * 0.7:.2f} "
                                 f"(마지막 정상 평가 step={last_ok_eval_step})")

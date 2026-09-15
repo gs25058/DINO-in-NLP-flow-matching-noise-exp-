@@ -1,0 +1,21 @@
+# R11-A 개루프(공격): 0.1348 -> 0.05. ΔH ≈ -0.152 nats.
+# 게이트: 실패 B(H(p_bar_t)/eff_rank 붕괴)가 500 step 내 발동하면 중단하고 기록한다.
+# 캘리브레이션 근거: scripts/measure_teacher_entropy_vs_tau.py (r12_t35_s42 teacher, 512문장).
+# H(tau): 0.1348->8.9869 / 0.105->8.9712 / 0.085->8.9503 / 0.07->8.9213 / 0.05->8.8346 / 0.03->8.5170
+# 스펙 원값(개루프 0.105/0.085 = -0.016/-0.037 nats, 폐루프 delta 0.3/0.6 = tau 0.030/0.020 필요)은
+# 두 arm이 10~20배 어긋나 비교 불가였고 폐루프는 tau_min=0.05에서 포화해 도달 불가였다.
+# 아래 값은 개루프와 폐루프가 "같은 H 도달점"을 갖도록 맞춘 것이다 - 스펙의 경로 의존성 비교 의도.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r11b_bert_ttdecay0.05
+loss:
+  teacher_temp_decay_start_frac: 0.45
+  teacher_temp_decay_end_frac: 0.85
+  teacher_temp_final: 0.05
+  teacher_temp_decay_shape: cosine
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
+  start_frac: 0.2           # step 300 - 그 전은 기준값(plateau 평균)과 비교 불가(step 0의 batch_KL 0.0222)
+  patience: 3               # 연속 위반 3회 요구 - 단발 노이즈로 중단하지 않는다

@@ -1,6 +1,13 @@
 # R12-B 완전 공유 rho=1.0. 모든 토큰이 같은 eps를 받는다.
 # 단, 문장 전체에 같은 방향 이동이 실리면 LayerNorm이 일부 흡수할 수 있어 rho=0.5보다
 # 효과가 작을 수 있다(P-V4, 관측만).
+# B0 실측(scripts/measure_view_hardness.py, r12_t35_s42, 512문장) - pooled / 토큰 코사인:
+#   r8 기준 U(0.35,0.50)  0.9429 / 0.8374
+#   iid  U(0.45,0.55)     0.9118 / 0.7709      rho=0.5     0.9138 / 0.8407   <- 쌍 1
+#   iid  U(0.50,0.60)     0.8744 / 0.7202      rho=1.0     0.8808 / 0.8406   <- 쌍 2
+#                                              cutoff 0.1  0.8894 / 0.8373   <- 쌍 2
+# 같은 pooled 난이도를 만드는 데 iid는 토큰을 44~72% 더 망가뜨려야 한다. 이 매트릭스는
+# pooled 난이도를 맞춘 쌍으로 구성해 "구조 때문인가 난이도 때문인가"(P-V3)를 직접 가른다.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
 run_name: r12c_bert_rho1.0
 augment:
@@ -10,3 +17,5 @@ collapse_guard:
   h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
   eff_rank_ref: 305.16
   batch_kl_ref: 0.0620
+  start_frac: 0.2          # step 300 - 그 전 구간은 기준값(plateau 평균)과 비교 불가
+  patience: 3              # 연속 위반 3회 요구 - 단발 노이즈로 중단하지 않는다
