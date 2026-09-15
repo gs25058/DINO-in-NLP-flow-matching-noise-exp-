@@ -8,8 +8,16 @@ augment:
   cutoff_mode: drop                # Optuna가 덮어씀
 collapse_guard:
   enabled: true
-  h_p_bar_t_ref: 9.0097
-  eff_rank_ref: 305.16
-  batch_kl_ref: 0.0620
+  # 기준값은 base(r12_bert_noise_optuna_t35) 자신의 plateau 실측(step 675~1499, 2시드).
+  # r8 값을 그대로 쓰면 안 된다 - 챔피언은 t 범위가 넓어 batch_KL이 0.0300으로 r8(0.0589)의
+  # 절반이라, r8 기준(중단선 0.0310)에서는 챔피언 자신이 붕괴로 판정된다(실측으로 확인).
+  h_p_bar_t_ref: 9.0100
+  eff_rank_ref: 295.07
+  # batch_KL만 0.024로 낮춘다(plateau 평균 0.0300이 아니라). 이 지표는 t 범위/뷰 설정에
+  # 가장 민감해 두 번 오발동했고, 개입이 켜진 run은 step 300 부근 최소가 0.0176까지 내려간다
+  # (실측) - 평균의 절반(0.0150)이면 여유가 1.17배뿐이다. 0.024 -> 중단선 0.0120으로 여유
+  # 1.47배를 확보한다. 진짜 균등 붕괴는 batch_KL을 0으로 몰고 가므로 검출력은 유지된다.
+  # 주 검출기는 H(p_bar_t)(최소 9.0095 vs 중단 8.7100)와 eff_rank(최소 283 vs 중단 207)다.
+  batch_kl_ref: 0.024
   start_frac: 0.2
   patience: 3

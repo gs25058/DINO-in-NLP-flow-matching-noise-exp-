@@ -214,6 +214,22 @@ def set_by_path(cfg: dict, dotted: str, value) -> None:
     node[keys[-1]] = value
 
 
+def parse_collapsed_sts(log_path: Path) -> float | None:
+    """붕괴 감시로 중단된 run의 마지막 유효 sts_b_dev를 돌려준다(중단이 아니면 None).
+
+    중단된 trial을 pruned로 버리면 TPE가 그 영역을 "값 없음"으로 보고 계속 재탐색한다.
+    낮은 점수로 기록해야 탐색이 붕괴 영역을 피해 간다. 평가가 한 번도 없었으면 None이고,
+    그때는 호출부가 아주 낮은 sentinel을 준다.
+    """
+    if not log_path.exists():
+        return None
+    text = log_path.read_text(errors="ignore")
+    if "COLLAPSE ABORT" not in text:
+        return None
+    hits = re.findall(r"EVAL sts_b_dev=([-\d.eE+]+)", text)
+    return float(hits[-1]) if hits else None
+
+
 def parse_final_sts(log_path: Path, min_step: int = 0) -> float | None:
     """train.log에서 마지막 'EVAL sts_b_dev=...' 값을 읽는다. 없으면 None(실패/미완주).
 
@@ -302,6 +318,16 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
     # 완주하지 못한 run이다(중도 사망) - 점수 대신 pruned로 처리한다.
     sts = parse_final_sts(log_path, min_step=max_steps - 1)
     if sts is None:
+        # 붕괴 감시로 중단된 run은 "실패"가 아니라 "나쁜 설정"이다. 마지막 유효 평가값으로
+        # 채점해야 TPE가 그 영역을 피한다 - pruned로 버리면 값이 없어 계속 재탐색한다.
+        collapsed = parse_collapsed_sts(log_path)
+        if collapsed is not None:
+            print(f"[tune] trial {trial.number}: COLLAPSED, 마지막 유효 sts_b_dev={collapsed:.4f} "
+                  f"params={trial.params}")
+            return collapsed
+        if "COLLAPSE ABORT" in (log_path.read_text(errors="ignore") if log_path.exists() else ""):
+            print(f"[tune] trial {trial.number}: COLLAPSED (평가 이력 없음) params={trial.params}")
+            return 0.0      # 평가 한 번도 못 한 붕괴 - 최저점
         print(f"[tune] trial {trial.number} FAILED/INCOMPLETE params={trial.params}\n"
               f"--- stderr tail ---\n{result.stderr[-2000:]}")
         raise optuna.TrialPruned()
