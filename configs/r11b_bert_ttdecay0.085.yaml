@@ -1,0 +1,14 @@
+# R11-A 개루프 공격적 arm: 0.1348 -> 0.085 (plateau의 63%).
+# 게이트: 실패 B(H(p_bar_t)/eff_rank 붕괴)가 500 step 내 발동하면 중단하고 기록한다.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r11b_bert_ttdecay0.085
+loss:
+  teacher_temp_decay_start_frac: 0.45
+  teacher_temp_decay_end_frac: 0.85
+  teacher_temp_final: 0.085
+  teacher_temp_decay_shape: cosine
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620

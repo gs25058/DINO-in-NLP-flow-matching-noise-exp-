@@ -1,0 +1,14 @@
+# R12-B span cutoff 10% drop. 비특수 토큰 중 연속 span을 attention/pooling 양쪽에서 제외.
+# teacher는 항상 깨끗한 원문을 본다. 배치 내 다른 문장은 관여하지 않으므로 문장 정체성 보존.
+# (선례: Cutoff, Shen et al. 2020 / ConSERT 증강 계열)
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r12d_bert_cutoff0.1
+augment:
+  cutoff_span_frac: 0.1
+  cutoff_prob: 1.0
+  cutoff_mode: drop
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620

@@ -1,0 +1,12 @@
+# R12-B 완전 공유 rho=1.0. 모든 토큰이 같은 eps를 받는다.
+# 단, 문장 전체에 같은 방향 이동이 실리면 LayerNorm이 일부 흡수할 수 있어 rho=0.5보다
+# 효과가 작을 수 있다(P-V4, 관측만).
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r12c_bert_rho1.0
+augment:
+  noise_corr_rho: 1.0
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620

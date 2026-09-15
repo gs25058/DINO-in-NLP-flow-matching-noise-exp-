@@ -1,0 +1,12 @@
+# R12-B 상관 노이즈 rho=0.5. t 범위는 r8 그대로 - 바뀌는 것은 노이즈의 구조뿐이다.
+# eps_i = sqrt(rho)*eps_shared + sqrt(1-rho)*eps_i^ind, 단위 분산 보존.
+# 문장당 하나의 eps_shared가 모든 토큰에 실리므로 mean pooling에서 1/L로 소멸하지 않는다.
+extends: r8_bert_coviso_sched_optuna_t50.yaml
+run_name: r12b_bert_rho0.5
+augment:
+  noise_corr_rho: 0.5
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
