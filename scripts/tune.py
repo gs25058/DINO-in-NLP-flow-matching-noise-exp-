@@ -133,6 +133,32 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
     # max_steps는 반드시 1500(배포 길이)로 돌릴 것 - warmup_frac이 frac*max_steps라서
     # 750-step 예산에서는 절대 step이 절반이 되어 결과가 전이되지 않는다(r5_schedules_full
     # 주석의 전례와 동일한 함정).
+    # R13 가설별 튜닝. 손으로 고른 값 때문에 가설이 기각된 것이 아님을 확인하려는 것이므로,
+    # base는 r8이 아니라 현 챔피언(r12_bert_noise_optuna_t35, 2시드 0.7333)이다 - 각 기제를
+    # "지금 실제로 도달한 상태" 위에서 평가한다.
+    #
+    # A: 엔트로피 제어기. R13 매트릭스에서 delta 0.066/0.152를 손으로 골랐고 둘 다 무반응이었다.
+    # 도달 가능 범위가 실측상 -0.66 nats까지이므로 상한을 0.8로 열고, 개입 시점·기간·이득도 함께 본다.
+    "r13_sharpen_ctrl": {
+        "loss.entropy_ctrl_delta": ("float", {"low": 0.02, "high": 0.8, "log": True}),
+        "loss.entropy_ctrl_gain": ("float", {"low": 0.05, "high": 1.0, "log": True}),
+        "loss.entropy_ctrl_start_frac": ("float", {"low": 0.15, "high": 0.70}),
+        "_ctrl_span_frac": ("float", {"low": 0.10, "high": 0.80}),   # end = min(1.0, start + span)
+    },
+    # B-cutoff: R13에서 유일하게 alignment/uniformity/rank를 동시에 개선한 기제.
+    # span 비율만 손으로 골랐고(0.1) prob/mode는 고정이었다 - 셋 다 연다.
+    "r13_view_cutoff": {
+        "augment.cutoff_span_frac": ("float", {"low": 0.02, "high": 0.35}),
+        "augment.cutoff_prob": ("float", {"low": 0.3, "high": 1.0}),
+        "augment.cutoff_mode": ("categorical", {"choices": ["drop", "mask"]}),
+    },
+    # B-rho: 상관 노이즈. rho를 넣으면 유효 난이도가 바뀌는데 챔피언의 t는 rho=0에서 튜닝된
+    # 값이라, t를 통째로 재탐색하지 않고 배율 하나만 열어 난이도만 재조정하게 한다
+    # (t 모양까지 다시 찾으면 노이즈 study를 중복하게 되고 10 trial로는 과소표본이다).
+    "r13_view_corr": {
+        "augment.noise_corr_rho": ("float", {"low": 0.05, "high": 1.0}),
+        "_t_scale": ("float", {"low": 0.6, "high": 1.3}),
+    },
     "flow_noise_t": {
         "augment.t_lo": ("float", {"low": 0.0, "high": 0.6}),
         "_t_span": ("float", {"low": 0.05, "high": 0.6}),      # t_max = t_lo + span (1.0 상한 clip)
@@ -154,8 +180,29 @@ def _derive_flow_noise_t(cfg: dict, pseudo: dict) -> None:
     cfg["augment"]["t_start"] = t_lo + (t_max - t_lo) * pseudo["_t_start_frac"]
 
 
+def _derive_r13_sharpen_ctrl(cfg: dict, pseudo: dict) -> None:
+    """end_frac을 start_frac + span으로 만들어 end < start 무효 조합을 없앤다."""
+    start = cfg["loss"]["entropy_ctrl_start_frac"]
+    cfg["loss"]["entropy_ctrl_end_frac"] = min(1.0, start + pseudo["_ctrl_span_frac"])
+
+
+def _derive_r13_view_corr(cfg: dict, pseudo: dict) -> None:
+    """base(챔피언)의 t 범위에 배율 하나를 곱한다. 모양은 유지하고 난이도만 조정."""
+    a = cfg["augment"]
+    scale = pseudo["_t_scale"]
+    a["t_lo"] = min(0.95, a["t_lo"] * scale)
+    a["t_max"] = min(1.0, a["t_max"] * scale)
+    a["t_start"] = min(a["t_start"] * scale, a["t_max"])
+    if a["t_lo"] >= a["t_max"]:                 # 배율로 뒤집히는 일은 없지만 방어적으로
+        a["t_lo"] = a["t_max"] * 0.5
+
+
 #: space_name -> 파생 파라미터 환산 함수. 없는 space는 의사 파라미터도 없다.
-DERIVED = {"flow_noise_t": _derive_flow_noise_t}
+DERIVED = {
+    "flow_noise_t": _derive_flow_noise_t,
+    "r13_sharpen_ctrl": _derive_r13_sharpen_ctrl,
+    "r13_view_corr": _derive_r13_view_corr,
+}
 
 
 def set_by_path(cfg: dict, dotted: str, value) -> None:

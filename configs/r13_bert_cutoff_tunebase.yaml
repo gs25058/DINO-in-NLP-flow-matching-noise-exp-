@@ -1,0 +1,15 @@
+# R13-B cutoff 튜닝 base: 현 챔피언 위에서 span cutoff를 켠다.
+# span_frac/prob/mode는 Optuna(space "r13_view_cutoff")가 덮어쓴다.
+extends: r12_bert_noise_optuna_t35.yaml
+run_name: r13_bert_cutoff_tunebase
+augment:
+  cutoff_span_frac: 0.1            # Optuna가 덮어씀
+  cutoff_prob: 1.0                 # Optuna가 덮어씀
+  cutoff_mode: drop                # Optuna가 덮어씀
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
+  start_frac: 0.2
+  patience: 3

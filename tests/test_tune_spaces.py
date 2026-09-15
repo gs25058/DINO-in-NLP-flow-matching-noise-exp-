@@ -64,10 +64,76 @@ def test_pseudo_params_never_leak_into_config():
         assert not any(k.startswith("_") for k in a), a
 
 
-def test_existing_spaces_have_no_pseudo_params():
-    """기존 공간들은 파생 기제 도입 전과 동일하게 동작해야 한다."""
+def test_pseudo_params_and_derived_hooks_agree():
+    """불변식: 의사 파라미터(_로 시작)를 쓰는 공간은 정확히 DERIVED 훅이 있는 공간이다.
+
+    한쪽만 있으면 조용히 깨진다 - 훅 없이 의사 파라미터를 두면 그 축이 config에 반영되지 않은
+    채 탐색만 낭비되고, 반대면 훅이 존재하지 않는 키를 읽어 KeyError가 난다.
+    """
+    with_pseudo = {n for n, s in tune.SEARCH_SPACES.items() if any(k.startswith("_") for k in s)}
+    assert with_pseudo == set(tune.DERIVED), (with_pseudo, set(tune.DERIVED))
+
+
+def test_every_non_pseudo_key_is_a_real_config_path():
+    """점 경로의 최상위 섹션이 config 구조에 실제로 존재하는 이름인지 (오타 방지)."""
+    allowed = {"loss", "train", "augment", "model", "eval", "data"}
     for name, space in tune.SEARCH_SPACES.items():
-        if name == "flow_noise_t":
-            continue
-        assert not any(k.startswith("_") for k in space), name
-        assert name not in tune.DERIVED, name
+        for dotted in space:
+            if dotted.startswith("_"):
+                continue
+            assert dotted.split(".")[0] in allowed, f"{name}: {dotted}"
+
+
+def _sample_with_base(space_name, base, n=200):
+    """base config(챔피언 상속값)를 주고 탐색 공간을 적용한 결과를 돌려준다."""
+    import copy
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    out = []
+    for _ in range(n):
+        trial = study.ask()
+        cfg = copy.deepcopy(base)
+        pseudo = {}
+        for dotted, (kind, kwargs) in tune.SEARCH_SPACES[space_name].items():
+            value = getattr(trial, f"suggest_{kind}")(dotted, **kwargs)
+            if dotted.startswith("_"):
+                pseudo[dotted] = value
+            else:
+                tune.set_by_path(cfg, dotted, value)
+        if space_name in tune.DERIVED:
+            tune.DERIVED[space_name](cfg, pseudo)
+        study.tell(trial, 0.0)
+        out.append(cfg)
+    return out
+
+
+def test_r13_sharpen_ctrl_window_is_always_valid():
+    base = {"loss": {"entropy_ctrl_start_frac": 0.45, "entropy_ctrl_end_frac": 0.85,
+                     "entropy_ctrl_delta": 0.1, "entropy_ctrl_gain": 0.3}}
+    for c in _sample_with_base("r13_sharpen_ctrl", base):
+        l = c["loss"]
+        assert 0.0 < l["entropy_ctrl_start_frac"] < l["entropy_ctrl_end_frac"] <= 1.0, l
+        assert 0.02 <= l["entropy_ctrl_delta"] <= 0.8, l
+
+
+def test_r13_view_corr_scales_t_without_inverting_it():
+    base = {"augment": {"t_lo": 0.392, "t_start": 0.615, "t_max": 0.881}}
+    for c in _sample_with_base("r13_view_corr", base):
+        a = c["augment"]
+        assert 0.0 <= a["t_lo"] < a["t_max"] <= 1.0, a
+        assert a["t_start"] <= a["t_max"], a
+        assert 0.05 <= a["noise_corr_rho"] <= 1.0, a
+
+
+def test_r13_view_cutoff_stays_in_range():
+    base = {"augment": {"cutoff_span_frac": 0.1, "cutoff_prob": 1.0, "cutoff_mode": "drop"}}
+    for c in _sample_with_base("r13_view_cutoff", base):
+        a = c["augment"]
+        assert 0.02 <= a["cutoff_span_frac"] <= 0.35
+        assert 0.3 <= a["cutoff_prob"] <= 1.0
+        assert a["cutoff_mode"] in ("drop", "mask")
+
+
+def test_r13_spaces_have_derived_hooks_where_needed():
+    assert "r13_sharpen_ctrl" in tune.DERIVED and "r13_view_corr" in tune.DERIVED
+    assert "r13_view_cutoff" not in tune.DERIVED      # 의사 파라미터가 없다

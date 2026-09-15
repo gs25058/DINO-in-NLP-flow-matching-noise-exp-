@@ -1,0 +1,13 @@
+# R13-B 상관 노이즈 튜닝 base: 현 챔피언 위에서 rho를 켠다.
+# rho와 t 배율은 Optuna(space "r13_view_corr")가 덮어쓴다.
+extends: r12_bert_noise_optuna_t35.yaml
+run_name: r13_bert_rho_tunebase
+augment:
+  noise_corr_rho: 0.5              # Optuna가 덮어씀
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
+  start_frac: 0.2
+  patience: 3

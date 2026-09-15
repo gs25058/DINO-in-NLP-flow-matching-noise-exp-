@@ -1,0 +1,19 @@
+# R13-A 튜닝 base: 현 챔피언 위에서 엔트로피 제어기를 켠다.
+# delta/gain/start_frac/end_frac은 Optuna(space "r13_sharpen_ctrl")가 덮어쓴다.
+extends: r12_bert_noise_optuna_t35.yaml
+run_name: r13_bert_hctrl_tunebase
+loss:
+  entropy_ctrl: true
+  entropy_ctrl_delta: 0.1          # Optuna가 덮어씀
+  entropy_ctrl_gain: 0.3           # Optuna가 덮어씀
+  entropy_ctrl_start_frac: 0.45    # Optuna가 덮어씀
+  entropy_ctrl_end_frac: 0.85      # Optuna가 덮어씀
+  entropy_ctrl_tau_min: 0.02       # -0.8 nats까지 열어두려면 하한이 낮아야 한다(실측: -0.66 at tau 0.02)
+  entropy_ctrl_max_step: 0.01
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0097
+  eff_rank_ref: 305.16
+  batch_kl_ref: 0.0620
+  start_frac: 0.2
+  patience: 3
