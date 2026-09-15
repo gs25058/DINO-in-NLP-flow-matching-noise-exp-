@@ -4,6 +4,8 @@ METHOD.md §2–3 이 스펙. 이 파일이 프로젝트의 핵심이며,
 학습 루프는 이 인터페이스 밖의 증강 세부를 알아서는 안 된다.
 """
 from dataclasses import dataclass
+import math
+
 import torch
 
 
@@ -16,15 +18,28 @@ class NoiseViews:
     t_students: list[torch.Tensor]        # K x [B]
     eps: list[torch.Tensor] | None        # velocity loss용 (표준화 공간의 ε)
     x0_std: torch.Tensor | None           # velocity loss용 (표준화된 원본 x̂)
+    # R12-B2 span cutoff가 켜졌을 때만 채워진다. None이면 학습 루프가 원본 attention_mask를
+    # 그대로 쓰므로 기존 동작과 동일하다.
+    student_masks: list[torch.Tensor] | None = None
 
 
 class FlowNoiseAug:
     def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, *,
                  mode: str, num_student_views: int,
                  t_lo: float, t_start: float, t_max: float,
-                 warmup_steps: int, delta_t: float):
-        """mu, sigma: [D], scripts/prepare_data.py가 계산해 캐시한 값."""
+                 warmup_steps: int, delta_t: float,
+                 noise_corr_rho: float = 0.0,
+                 cutoff_span_frac: float = 0.0, cutoff_prob: float = 1.0,
+                 cutoff_mode: str = "drop", mask_embed: torch.Tensor | None = None):
+        """mu, sigma: [D], scripts/prepare_data.py가 계산해 캐시한 값.
+
+        R12 신규(둘 다 기본값이 off이며 그때 기존과 bit-identical):
+          noise_corr_rho: 토큰 간 노이즈 상관. 0이면 현행(토큰별 독립).
+          cutoff_span_frac: student 뷰마다 연속 span을 잘라내는 비율. 0이면 off.
+        """
         assert mode in ("anchor", "consistency"), f"unknown mode: {mode}"
+        assert 0.0 <= noise_corr_rho <= 1.0, f"noise_corr_rho는 [0,1]: {noise_corr_rho}"
+        assert cutoff_mode in ("drop", "mask"), f"unknown cutoff_mode: {cutoff_mode}"
         self.mu = mu
         self.sigma = sigma
         self.mode = mode
@@ -34,6 +49,11 @@ class FlowNoiseAug:
         self.t_max = t_max
         self.warmup_steps = warmup_steps
         self.delta_t = delta_t
+        self.noise_corr_rho = noise_corr_rho
+        self.cutoff_span_frac = cutoff_span_frac
+        self.cutoff_prob = cutoff_prob
+        self.cutoff_mode = cutoff_mode
+        self.mask_embed = mask_embed
 
     def t_hi(self, step: int) -> float:
         """curriculum: t_start -> t_max 선형 증가, warmup_steps 이후 고정.
@@ -42,8 +62,47 @@ class FlowNoiseAug:
         frac = min(1.0, step / self.warmup_steps) if self.warmup_steps > 0 else 1.0
         return self.t_start + (self.t_max - self.t_start) * frac
 
+    def _apply_cutoff(self, embeds: torch.Tensor, special_mask: torch.Tensor,
+                      attention_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """R12-B2: 문장마다 비특수 토큰 중 연속 span 하나를 잘라낸다.
+
+        "drop"은 attention_mask를 0으로 만들어 attention과 pooling 양쪽에서 제외하고,
+        "mask"는 해당 위치 임베딩을 [MASK]로 치환한다(pooling에는 포함된다).
+        어느 쪽이든 CLS/SEP/pad는 건드리지 않으며, teacher는 항상 깨끗한 원문을 본다.
+
+        토큰별 독립 노이즈와 달리 이 열화는 구조적이라 mean pooling에서 평균되어 사라지지
+        않는다 - "pooled 수준에서 실제로 어려운 positive"를 만드는 것이 목적이다.
+        (선례: Cutoff, Shen et al. 2020 / ConSERT 증강 계열. 배치 내 다른 문장은 관여하지
+        않으므로 문장 정체성은 보존된다.)
+        """
+        B, L, _ = embeds.shape
+        new_mask = attention_mask.clone()
+        new_embeds = embeds
+        if self.cutoff_mode == "mask":
+            new_embeds = embeds.clone()
+        valid = (~special_mask) & (attention_mask.bool())
+        for b in range(B):
+            idx = valid[b].nonzero(as_tuple=True)[0]
+            if idx.numel() == 0:
+                continue
+            if self.cutoff_prob < 1.0 and float(torch.rand(1)) >= self.cutoff_prob:
+                continue
+            n_valid = int(idx.numel())
+            span = max(1, int(self.cutoff_span_frac * n_valid))
+            span = min(span, n_valid)
+            first, last = int(idx[0]), int(idx[-1])
+            hi = last - span + 1
+            start = first if hi <= first else int(torch.randint(first, hi + 1, (1,)))
+            sl = slice(start, start + span)
+            if self.cutoff_mode == "drop":
+                new_mask[b, sl] = 0
+            else:
+                new_embeds[b, sl] = self.mask_embed.to(device=embeds.device, dtype=embeds.dtype)
+        return new_embeds, new_mask
+
     def __call__(self, token_embeds: torch.Tensor,
-                 special_mask: torch.Tensor, step: int) -> NoiseViews:
+                 special_mask: torch.Tensor, step: int,
+                 attention_mask: torch.Tensor | None = None) -> NoiseViews:
         """token_embeds: word embedding lookup 출력 [B, L, D] (위치 임베딩 합산 전).
         special_mask: [B, L] bool, True = CLS/SEP/pad (노이즈 제외).
 
@@ -75,9 +134,24 @@ class FlowNoiseAug:
         def sample_t() -> torch.Tensor:
             return self.t_lo + (t_hi_now - self.t_lo) * torch.rand(B, device=device, dtype=dtype)
 
+        def sample_eps() -> torch.Tensor:
+            """R12-B1: eps_i = sqrt(rho)*eps_shared + sqrt(1-rho)*eps_i^ind.
+
+            rho=0이면 torch.randn 한 번과 완전히 동일한 소비 패턴이라 기존 run과 bit-identical이다.
+            문장당 하나의 eps_shared를 모든 토큰이 공유하므로, mean pooling에서 1/L로 소멸하지
+            않고 살아남는다 - 토큰별 독립 노이즈가 pooled 수준에서 사라지는 문제(오류 2)를
+            정면으로 겨냥한 형태다. 계수는 단위 분산을 보존한다(rho + (1-rho) = 1).
+            """
+            if self.noise_corr_rho <= 0.0:
+                return torch.randn(B, L, D, device=device, dtype=dtype)
+            ind = torch.randn(B, L, D, device=device, dtype=dtype)
+            shared = torch.randn(B, 1, D, device=device, dtype=dtype).expand(B, L, D)
+            rho = self.noise_corr_rho
+            return math.sqrt(rho) * shared + math.sqrt(1.0 - rho) * ind
+
         def make_view(t_vec: torch.Tensor, eps: torch.Tensor | None = None):
             if eps is None:
-                eps = torch.randn(B, L, D, device=device, dtype=dtype)
+                eps = sample_eps()
             t_b = t_vec.view(B, 1, 1)
             x_t = (1 - t_b) * x_hat + t_b * eps
             x_noised = x_t * sigma + mu
@@ -94,6 +168,18 @@ class FlowNoiseAug:
             t_students.append(t_s)
             eps_list.append(eps_s)
 
+        student_masks = None
+        if self.cutoff_span_frac > 0.0:
+            if attention_mask is None:
+                raise ValueError("cutoff_span_frac > 0 이면 attention_mask가 필요하다")
+            if self.cutoff_mode == "mask" and self.mask_embed is None:
+                raise ValueError('cutoff_mode="mask"면 mask_embed가 필요하다')
+            student_masks = []
+            for k in range(len(student_embeds)):
+                e, m = self._apply_cutoff(student_embeds[k], special_mask, attention_mask)
+                student_embeds[k] = e
+                student_masks.append(m)
+
         if self.mode == "anchor":
             t_teacher = torch.zeros(B, device=device, dtype=dtype)
             teacher_embeds = token_embeds
@@ -108,4 +194,5 @@ class FlowNoiseAug:
             t_students=t_students,
             eps=eps_list,
             x0_std=x_hat,
+            student_masks=student_masks,
         )
