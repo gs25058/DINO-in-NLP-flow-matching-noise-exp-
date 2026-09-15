@@ -1,5 +1,5 @@
-# R12-B 대조군 1: iid 노이즈만 강화 U(0.45, 0.55). pooled 0.9118 - r12b(rho=0.5, 0.9138)와 짝.
-# 구조는 그대로 두고 난이도만 맞췄다. 이 arm이 r12b만큼 개선되면 원인은 구조가 아니라
+# R13-B 대조군 1: iid 노이즈만 강화 U(0.45, 0.55). pooled 0.9118 - rho0.5(0.9138)와 짝.
+# 구조는 그대로 두고 난이도만 맞췄다. 이 arm이 rho0.5만큼 개선되면 원인은 구조가 아니라
 # 난이도였다는 뜻이다(P-V3).
 # B0 실측(scripts/measure_view_hardness.py, r12_t35_s42, 512문장) - pooled / 토큰 코사인:
 #   r8 기준 U(0.35,0.50)  0.9429 / 0.8374
@@ -9,7 +9,7 @@
 # 같은 pooled 난이도를 만드는 데 iid는 토큰을 44~72% 더 망가뜨려야 한다. 이 매트릭스는
 # pooled 난이도를 맞춘 쌍으로 구성해 "구조 때문인가 난이도 때문인가"(P-V3)를 직접 가른다.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
-run_name: r12a_bert_iid_t0.45-0.55
+run_name: r13_bert_iid_t0.45-0.55
 augment:
   t_lo: 0.45
   t_start: 0.55

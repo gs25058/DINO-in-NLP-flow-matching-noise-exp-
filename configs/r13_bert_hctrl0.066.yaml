@@ -1,4 +1,4 @@
-# R11-A 폐루프: H(p_t)를 anchor -> anchor-0.066 nats. r11a와 같은 H 도달점, 다른 경로.
+# R13-A 폐루프: H(p_t)를 anchor -> anchor-0.066 nats. r13_bert_ttdecay0.07과 같은 H 도달점, 다른 경로.
 # 설계 좌표를 tau가 아니라 H로 잡는 이유 - logit 스케일이 자라므로 같은 tau가 같은
 # 유효 날카로움을 뜻하지 않는다. 두 arm 결과가 다르면 경로(속도) 의존성이 있다는 뜻이다.
 #
@@ -12,7 +12,7 @@
 # 두 arm이 10~20배 어긋나 비교 불가였고 폐루프는 tau_min=0.05에서 포화해 도달 불가였다.
 # 아래 값은 개루프와 폐루프가 "같은 H 도달점"을 갖도록 맞춘 것이다 - 스펙의 경로 의존성 비교 의도.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
-run_name: r11c_bert_hctrl0.066
+run_name: r13_bert_hctrl0.066
 loss:
   entropy_ctrl: true
   entropy_ctrl_start_frac: 0.45

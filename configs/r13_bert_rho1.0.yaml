@@ -1,6 +1,6 @@
-# R12-B span cutoff 10% drop. 비특수 토큰 중 연속 span을 attention/pooling 양쪽에서 제외.
-# teacher는 항상 깨끗한 원문을 본다. 배치 내 다른 문장은 관여하지 않으므로 문장 정체성 보존.
-# (선례: Cutoff, Shen et al. 2020 / ConSERT 증강 계열)
+# R13-B 완전 공유 rho=1.0. 모든 토큰이 같은 eps를 받는다.
+# 단, 문장 전체에 같은 방향 이동이 실리면 LayerNorm이 일부 흡수할 수 있어 rho=0.5보다
+# 효과가 작을 수 있다(P-V4, 관측만).
 # B0 실측(scripts/measure_view_hardness.py, r12_t35_s42, 512문장) - pooled / 토큰 코사인:
 #   r8 기준 U(0.35,0.50)  0.9429 / 0.8374
 #   iid  U(0.45,0.55)     0.9118 / 0.7709      rho=0.5     0.9138 / 0.8407   <- 쌍 1
@@ -9,11 +9,9 @@
 # 같은 pooled 난이도를 만드는 데 iid는 토큰을 44~72% 더 망가뜨려야 한다. 이 매트릭스는
 # pooled 난이도를 맞춘 쌍으로 구성해 "구조 때문인가 난이도 때문인가"(P-V3)를 직접 가른다.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
-run_name: r12d_bert_cutoff0.1
+run_name: r13_bert_rho1.0
 augment:
-  cutoff_span_frac: 0.1
-  cutoff_prob: 1.0
-  cutoff_mode: drop
+  noise_corr_rho: 1.0
 collapse_guard:
   enabled: true
   h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측

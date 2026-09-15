@@ -1,6 +1,6 @@
-# R12-B 상관 노이즈 rho=0.5. t 범위는 r8 그대로 - 바뀌는 것은 노이즈의 구조뿐이다.
-# eps_i = sqrt(rho)*eps_shared + sqrt(1-rho)*eps_i^ind, 단위 분산 보존.
-# 문장당 하나의 eps_shared가 모든 토큰에 실리므로 mean pooling에서 1/L로 소멸하지 않는다.
+# R13-B span cutoff 10% drop. 비특수 토큰 중 연속 span을 attention/pooling 양쪽에서 제외.
+# teacher는 항상 깨끗한 원문을 본다. 배치 내 다른 문장은 관여하지 않으므로 문장 정체성 보존.
+# (선례: Cutoff, Shen et al. 2020 / ConSERT 증강 계열)
 # B0 실측(scripts/measure_view_hardness.py, r12_t35_s42, 512문장) - pooled / 토큰 코사인:
 #   r8 기준 U(0.35,0.50)  0.9429 / 0.8374
 #   iid  U(0.45,0.55)     0.9118 / 0.7709      rho=0.5     0.9138 / 0.8407   <- 쌍 1
@@ -9,9 +9,11 @@
 # 같은 pooled 난이도를 만드는 데 iid는 토큰을 44~72% 더 망가뜨려야 한다. 이 매트릭스는
 # pooled 난이도를 맞춘 쌍으로 구성해 "구조 때문인가 난이도 때문인가"(P-V3)를 직접 가른다.
 extends: r8_bert_coviso_sched_optuna_t50.yaml
-run_name: r12b_bert_rho0.5
+run_name: r13_bert_cutoff0.1
 augment:
-  noise_corr_rho: 0.5
+  cutoff_span_frac: 0.1
+  cutoff_prob: 1.0
+  cutoff_mode: drop
 collapse_guard:
   enabled: true
   h_p_bar_t_ref: 9.0097     # r8 plateau(step 675~1499, 2시드) 실측
