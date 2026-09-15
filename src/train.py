@@ -153,6 +153,17 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="config의 seed override (매트릭스 다중 시드용)")
     parser.add_argument("--run-name-suffix", default="", help="wandb run_name에 덧붙일 접미사 (예: _seed43)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    # 가속 스위치. config로도 켤 수 있고(train.tf32 / train.batch_views / model.attn_implementation)
+    # 여기서 실행 시 덮어쓸 수도 있다. 기본값 None = config를 따른다(그리고 config 기본은 off).
+    parser.add_argument("--tf32", dest="tf32", action="store_true", default=None,
+                        help="Ampere 이상에서 TF32 matmul 허용 (torch 기본값은 꺼짐)")
+    parser.add_argument("--no-tf32", dest="tf32", action="store_false",
+                        help="config가 켜 놓았어도 TF32를 끈다")
+    parser.add_argument("--batch-views", dest="batch_views", action="store_true", default=None,
+                        help="K개 student 뷰를 forward 1회로 묶는다(수학적 동치)")
+    parser.add_argument("--no-batch-views", dest="batch_views", action="store_false")
+    parser.add_argument("--attn-impl", default=None,
+                        help='backbone attention 구현 (예: "sdpa", "eager"). 미지정이면 transformers 기본')
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -160,6 +171,12 @@ def main():
         cfg["train"]["max_steps"] = args.max_steps
     if args.seed is not None:
         cfg["seed"] = args.seed
+    if args.tf32 is not None:
+        cfg["train"]["tf32"] = args.tf32
+    if args.batch_views is not None:
+        cfg["train"]["batch_views"] = args.batch_views
+    if args.attn_impl is not None:
+        cfg["model"]["attn_implementation"] = args.attn_impl
     if args.run_name_suffix:
         cfg["run_name"] = cfg["run_name"] + args.run_name_suffix
 
@@ -193,7 +210,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     rank_eval_sentences = load_sentences(ROOT / cfg["data"]["rank_eval_path"])
 
     student = DinoTextModel(
-        cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"], cfg["model"]["head"]["logit_dim"]
+        cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"], cfg["model"]["head"]["logit_dim"],
+        attn_implementation=cfg["model"].get("attn_implementation"),
     ).to(device)
     teacher = EMATeacher(student, momentum=cfg["train"]["teacher_momentum"])
 
@@ -306,6 +324,23 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     max_tokens = cfg["data"]["max_tokens"]
     batch_size = cfg["train"]["batch_size"]
     log_every = cfg["eval"]["log_every_steps"]
+    # 가속 스위치. 셋 다 기본 off이며 그때 기존 run과 동일한 경로다.
+    #   batch_views: K개 student 뷰를 forward 1회로 묶는다(수학적 동치, 부동소수점 누적만 다름).
+    #   tf32: A6000(Ampere)의 TF32 텐서코어를 matmul에 허용한다. torch 2.x 기본값이 False라
+    #         지금까지 순수 FP32로 돌았다. mantissa 10비트로 bf16(7비트)보다 보수적이지만
+    #         기존 측정치와 bit-identical은 아니다.
+    batch_views = cfg["train"].get("batch_views", False)
+    if cfg["train"].get("tf32", False):
+        # TF32는 Ampere(SM 8.0) 이상에서만 의미가 있다. 그 아래에서는 조용히 무시되므로
+        # 켰다고 믿고 넘어가지 않도록 여기서 확인하고 로그에 남긴다.
+        cap = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
+        if cap >= (8, 0):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info(f"[train] TF32 matmul 활성화 (SM {cap[0]}.{cap[1]})")
+        else:
+            logger.info(f"[train] TF32 요청됐으나 이 GPU(SM {cap[0]}.{cap[1]})는 Ampere 미만 - 무시")
+
     eval_every = cfg["eval"]["every_steps"]
     # 평가할 표현 공간(evaluate.EVAL_SPACES). Final Embedding 외에 DINO head를 통과한 벡터도
     # 함께 재는 것이 기본값이다 - backbone forward를 공유하므로 평가 시간은 거의 그대로다.
@@ -379,10 +414,25 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         cov_iso_losses = []
         cov_iso_mean_terms = []
         cov_iso_cov_terms = []
+        # B2 drop 모드는 뷰마다 attention_mask가 다르다(잘린 span 제외). off면 원본 그대로.
+        view_masks = (views.student_masks if views.student_masks is not None
+                      else [attention_mask] * len(views.student_embeds))
+        if batch_views and len(views.student_embeds) > 1:
+            # K개 뷰를 배치 축으로 이어 붙여 forward 1회로 처리한다. 토큰 길이 중앙값이 27이라
+            # 배치 32는 GPU에 너무 작아 커널 런치와 낮은 점유율로 시간을 버린다.
+            # 수학적으로는 뷰별 forward와 동일하다(배치 간 결합 연산이 없음) - 부동소수점
+            # 누적 순서만 달라져 bit-identical은 아니다. 그래서 기본값은 off다.
+            cat_out = student(inputs_embeds=torch.cat(views.student_embeds, dim=0),
+                              attention_mask=torch.cat(view_masks, dim=0))
+            fwd = list(zip(*(x.chunk(len(views.student_embeds), dim=0) for x in cat_out[:3])))
+        else:
+            fwd = None
         for k, s_embeds in enumerate(views.student_embeds):
-            # B2 drop 모드는 뷰마다 attention_mask가 다르다(잘린 span 제외). off면 원본 그대로.
-            s_mask = views.student_masks[k] if views.student_masks is not None else attention_mask
-            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=s_mask)
+            s_mask = view_masks[k]
+            if fwd is not None:
+                s_embedding, s_logits, s_hidden = fwd[k]
+            else:
+                s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=s_mask)
             student_logits.append(s_logits)
             student_embeds_norm.append(s_embedding)
             if velocity_head is not None:

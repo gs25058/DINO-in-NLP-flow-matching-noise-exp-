@@ -57,13 +57,19 @@ class DINOHead(nn.Module):
 class DinoTextModel(nn.Module):
     """backbone + DINO head. forward(inputs_embeds, attention_mask) -> (embedding, logits)."""
 
-    def __init__(self, backbone_name: str, bottleneck_dim: int, logit_dim: int):
+    def __init__(self, backbone_name: str, bottleneck_dim: int, logit_dim: int,
+                 attn_implementation: str | None = None):
         super().__init__()
         config = AutoConfig.from_pretrained(backbone_name)
         for field in _DROPOUT_FIELDS:
             if hasattr(config, field):
                 setattr(config, field, 0.0)
-        self.backbone = AutoModel.from_pretrained(backbone_name, config=config)
+        # attn_implementation: "sdpa"를 주면 PyTorch의 scaled_dot_product_attention을 쓴다.
+        # None(기본)이면 transformers의 기본 선택에 맡긴다 - 기존 run과 동일 경로.
+        kwargs = {"config": config}
+        if attn_implementation is not None:
+            kwargs["attn_implementation"] = attn_implementation
+        self.backbone = AutoModel.from_pretrained(backbone_name, **kwargs)
         self.head = DINOHead(config.hidden_size, bottleneck_dim, logit_dim)
 
     def get_input_embeddings(self) -> nn.Module:
