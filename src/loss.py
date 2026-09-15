@@ -5,6 +5,8 @@ METHOD.md §4.2: 보조 velocity loss (R4에서만 사용).
 
 학습 루프는 이 파일이 반환하는 (loss, aux_dict)만 소비한다 (CLAUDE.md 구현 원칙 4).
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -258,3 +260,65 @@ def velocity_loss(
     keep = (~special_mask).to(per_token.dtype)
     denom = keep.sum().clamp_min(1.0)
     return (per_token * keep).sum() / denom
+
+
+class EntropyCtrl:
+    """R11-A2: teacher 엔트로피 H(p_t)를 목표 궤적에 맞춰 teacher 온도를 조절하는 폐루프 제어기.
+
+    설계 좌표를 tau_t가 아니라 H_pt로 잡는 이유: 학습이 진행되면 logit 스케일이 자라므로
+    같은 tau_t가 같은 "유효 날카로움"을 뜻하지 않는다. 엔트로피는 그 스케일 변화를 흡수한다.
+
+    동작:
+      - start 시점의 H_pt EMA를 H_anchor로 고정한다.
+      - 목표 H_target은 [start, end] 구간에서 H_anchor -> H_anchor - delta 로 cosine 하강,
+        이후 유지.
+      - 매 스텝 err = H_ema - H_target 에 대해 tau <- clip(tau * exp(-gain * err), tau_min, tau_max).
+        H가 목표보다 높으면(너무 뭉툭) err>0 이라 tau가 내려가 더 날카로워진다.
+      - 스텝당 상대 변화는 max_step으로 제한한다(진동 억제).
+
+    개루프(A1 decay)와 달리 "도달점"을 엔트로피로 지정하므로, 같은 H에 도달하는 두 경로의
+    결과가 다르면 경로(속도) 의존성이 있다는 뜻이다 - 사전 등록 예측의 비교 항목이다.
+    """
+
+    def __init__(self, start_step: int, end_step: int, delta: float, gain: float,
+                 tau_min: float, tau_max: float, tau_init: float,
+                 max_step: float = 0.01, ema_momentum: float = 0.9):
+        if end_step < start_step:
+            raise ValueError(f"end_step({end_step})이 start_step({start_step})보다 앞설 수 없다")
+        if not 0.0 < tau_min <= tau_max:
+            raise ValueError(f"tau 범위가 잘못됨: [{tau_min}, {tau_max}]")
+        self.start_step, self.end_step = start_step, end_step
+        self.delta, self.gain = delta, gain
+        self.tau_min, self.tau_max = tau_min, tau_max
+        self.max_step, self.ema_momentum = max_step, ema_momentum
+        self.tau = min(max(tau_init, tau_min), tau_max)
+        self.h_ema: float | None = None
+        self.h_anchor: float | None = None
+
+    def observe(self, h_pt: float) -> None:
+        """매 스텝 관측. 제어 시작 전에도 EMA는 돌려두어야 anchor가 안정된다."""
+        self.h_ema = h_pt if self.h_ema is None else (
+            self.ema_momentum * self.h_ema + (1.0 - self.ema_momentum) * h_pt
+        )
+
+    def target(self, step: int) -> float | None:
+        """현재 step의 H_target. anchor가 잡히기 전이면 None."""
+        if self.h_anchor is None:
+            return None
+        span = self.end_step - self.start_step
+        progress = min(1.0, (step - self.start_step) / span) if span > 0 else 1.0
+        progress = min(max(progress, 0.0), 1.0)
+        ease = (1 - math.cos(math.pi * progress)) / 2          # cosine 하강
+        return self.h_anchor - self.delta * ease
+
+    def update(self, step: int) -> float:
+        """이번 스텝에 쓸 tau_t를 돌려준다. start 이전이면 tau_init 그대로."""
+        if step < self.start_step:
+            return self.tau
+        if self.h_anchor is None:
+            self.h_anchor = self.h_ema                          # 인계 시점의 EMA로 고정
+        err = self.h_ema - self.target(step)
+        factor = math.exp(-self.gain * err)
+        factor = min(max(factor, 1.0 - self.max_step), 1.0 + self.max_step)   # 스텝당 상대 변화 제한
+        self.tau = min(max(self.tau * factor, self.tau_min), self.tau_max)
+        return self.tau

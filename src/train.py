@@ -28,7 +28,8 @@ from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
-from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
+from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, EntropyCtrl,
+                      batch_kl_diagnostic, koleo_loss, velocity_loss)
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
@@ -127,7 +128,7 @@ def build_param_groups(
     return [g for g in groups if len(g["params"]) > 0]
 
 
-def build_augment(cfg: dict) -> FlowNoiseAug:
+def build_augment(cfg: dict, mask_embed: torch.Tensor | None = None) -> FlowNoiseAug:
     stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], weights_only=True)
     a = cfg["augment"]
     warmup_steps = max(1, int(a["warmup_frac"] * cfg["train"]["max_steps"]))
@@ -136,6 +137,12 @@ def build_augment(cfg: dict) -> FlowNoiseAug:
         mode=a["mode"], num_student_views=a["num_student_views"],
         t_lo=a["t_lo"], t_start=a["t_start"], t_max=a["t_max"],
         warmup_steps=warmup_steps, delta_t=a["delta_t"],
+        # R12-B: 둘 다 기본값이 off이며 그때 기존 config와 bit-identical이다.
+        noise_corr_rho=a.get("noise_corr_rho", 0.0),
+        cutoff_span_frac=a.get("cutoff_span_frac", 0.0),
+        cutoff_prob=a.get("cutoff_prob", 1.0),
+        cutoff_mode=a.get("cutoff_mode", "drop"),
+        mask_embed=mask_embed,
     )
 
 
@@ -190,7 +197,13 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     ).to(device)
     teacher = EMATeacher(student, momentum=cfg["train"]["teacher_momentum"])
 
-    aug = build_augment(cfg)
+    # cutoff_mode="mask"일 때만 필요한 [MASK] 임베딩. 그 외에는 None이라 비용이 없다.
+    mask_embed = None
+    if cfg["augment"].get("cutoff_span_frac", 0.0) > 0 and cfg["augment"].get("cutoff_mode") == "mask":
+        mask_embed = student.get_input_embeddings()(
+            torch.tensor([tokenizer.mask_token_id], device=device)
+        )[0].detach().clone()
+    aug = build_augment(cfg, mask_embed)
     dino_loss = DINOLoss(
         cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"],
         centering=cfg["loss"].get("centering", "ema"),
@@ -231,6 +244,42 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         max(1, int(teacher_temp_warmup_frac * max_steps)) if warmup_teacher_temp is not None else None
     )
     teacher_temp_shape = cfg["loss"].get("teacher_temp_shape", "linear")
+    # R11-A1 후반 샤프닝 하강 국면. teacher_temp_final이 없으면(기본) r8과 bit-identical.
+    tt_final = cfg["loss"].get("teacher_temp_final")
+    tt_decay_start_frac = cfg["loss"].get("teacher_temp_decay_start_frac")
+    tt_decay_end_frac = cfg["loss"].get("teacher_temp_decay_end_frac", 1.0)
+    tt_decay_shape = cfg["loss"].get("teacher_temp_decay_shape", "cosine")
+    if tt_final is not None and tt_decay_start_frac is None:
+        raise ValueError("loss.teacher_temp_final을 주면 loss.teacher_temp_decay_start_frac도 필요하다")
+    tt_decay_start = int(tt_decay_start_frac * max_steps) if tt_final is not None else None
+    tt_decay_end = int(tt_decay_end_frac * max_steps) if tt_final is not None else None
+
+    # R11-A2 엔트로피 목표 제어기. 켜면 A1 하강 국면은 비활성(plateau까지 개루프, 이후 인계).
+    ectrl_cfg = cfg["loss"]
+    entropy_ctrl = None
+    if ectrl_cfg.get("entropy_ctrl", False):
+        tt_final = None              # 인계 - 개루프 하강과 폐루프가 동시에 걸리지 않게
+        entropy_ctrl = EntropyCtrl(
+            start_step=int(ectrl_cfg.get("entropy_ctrl_start_frac", 0.45) * max_steps),
+            end_step=int(ectrl_cfg.get("entropy_ctrl_end_frac", 0.85) * max_steps),
+            delta=ectrl_cfg["entropy_ctrl_delta"],
+            gain=ectrl_cfg.get("entropy_ctrl_gain", 0.02),
+            tau_min=ectrl_cfg.get("entropy_ctrl_tau_min", 0.05),
+            tau_max=ectrl_cfg.get("entropy_ctrl_tau_max", teacher_temp_static),
+            tau_init=teacher_temp_static,
+            max_step=ectrl_cfg.get("entropy_ctrl_max_step", 0.01),
+        )
+
+    # 붕괴 감시(전 run 공통). 기준값은 r8 plateau(step 675~1499, 2시드) 실측:
+    #   H(p_bar_t) 9.0097 / eff_rank 305.16 / batch_KL 0.0620
+    # cov_iso는 응축(rank 붕괴)은 막지만 p_bar_t가 한 점으로 쏠리는 경로는 막지 못한다.
+    guard = cfg.get("collapse_guard", {})
+    guard_on = guard.get("enabled", False)
+    g_hbar = guard.get("h_p_bar_t_ref", 9.0097)
+    g_rank = guard.get("eff_rank_ref", 305.16)
+    g_bkl = guard.get("batch_kl_ref", 0.0620)
+    guard_warned = False
+    last_ok_eval_step = -1      # 중단 보고용 - 감시를 통과한 마지막 평가 step
     momentum_start = cfg["train"].get("momentum_start")
     momentum_end = cfg["train"].get("momentum_end")
     momentum_shape = cfg["train"].get("momentum_shape", "cosine")
@@ -297,14 +346,17 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         if warmup_teacher_temp is not None:
             teacher_temp = teacher_temp_schedule(step, warmup_teacher_temp, teacher_temp_static,
-                                                 teacher_temp_warmup_steps, teacher_temp_shape)
+                                                 teacher_temp_warmup_steps, teacher_temp_shape,
+                                                 tt_decay_start, tt_decay_end, tt_final, tt_decay_shape)
+            if entropy_ctrl is not None and step >= entropy_ctrl.start_step:
+                teacher_temp = entropy_ctrl.tau      # 인계 후에는 제어기가 온도를 쥔다
         else:
             teacher_temp = teacher_temp_static
 
         koleo_lambda = resolve_koleo_lambda(step, koleo_lambda_max, koleo_hold_steps, koleo_decay_steps, koleo_min_ratio)
 
         token_embeds = student.get_input_embeddings()(input_ids)
-        views = aug(token_embeds, special_mask, step)
+        views = aug(token_embeds, special_mask, step, attention_mask)
 
         with torch.no_grad():
             t_embedding, t_logits, *_ = teacher(
@@ -314,14 +366,18 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
+        student_embeds_norm = []   # pos_cos_raw 진단용(정규화된 pooled). r10에서 이 로깅만 이식.
         vel_losses = []
         koleo_losses = []
         cov_iso_losses = []
         cov_iso_mean_terms = []
         cov_iso_cov_terms = []
         for k, s_embeds in enumerate(views.student_embeds):
-            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            # B2 drop 모드는 뷰마다 attention_mask가 다르다(잘린 span 제외). off면 원본 그대로.
+            s_mask = views.student_masks[k] if views.student_masks is not None else attention_mask
+            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=s_mask)
             student_logits.append(s_logits)
+            student_embeds_norm.append(s_embedding)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
@@ -337,6 +393,17 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 cov_iso_cov_terms.append(iso_aux["L_iso_cov"])
 
         loss, aux = dino_loss(t_logits, student_logits, teacher_temp, student_temp)
+        with torch.no_grad():
+            # 노이즈 student 뷰 vs 깨끗한 teacher의 pooled 코사인. 뷰가 pooled 수준에서
+            # 실제로 어려운지를 보는 지표다(R12의 핵심 진단). 1에 가까울수록 공짜 positive.
+            aux["pos_cos_raw"] = torch.stack(
+                [F.cosine_similarity(z_s, t_embedding, dim=-1) for z_s in student_embeds_norm]
+            ).mean()
+
+        if entropy_ctrl is not None:
+            # 이번 스텝의 온도는 이미 위에서 확정됐다 - 여기서 만드는 tau는 다음 스텝용이다.
+            entropy_ctrl.observe(aux["H_pt"].item())
+            entropy_ctrl.update(step)
         total_loss = loss
         if velocity_head is not None:
             l_vel = torch.stack(vel_losses).mean()
@@ -405,7 +472,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 "KL_pt_ps": aux["KL_pt_ps"].item(),
                 "batch_KL": b_kl.item(),
                 "H_p_bar_t": aux["H_p_bar_t"].item(),
+                "pos_cos_raw": aux["pos_cos_raw"].item(),
             }
+            if entropy_ctrl is not None:
+                log["tau_t"] = entropy_ctrl.tau
+                log["H_ema"] = entropy_ctrl.h_ema
+                tgt = entropy_ctrl.target(step)
+                if tgt is not None:
+                    log["H_target"] = tgt
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
             if "L_koleo" in aux:
@@ -442,6 +516,19 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             for k, v in log.items():
                 tb_writer.add_scalar(f"train/{k}", v, step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
+
+            if guard_on:
+                # cov_iso는 응축(rank 붕괴)은 막지만 p_bar_t가 한 점으로 쏠리는 경로는 못 막는다.
+                # 기준값 대비 상대 임계로 판정하고, 중단 시 마지막 정상 평가 step을 남긴다.
+                hbar = log["H_p_bar_t"]
+                if hbar < g_hbar - 0.30 or log["batch_KL"] < g_bkl * 0.5:
+                    why = (f"H_p_bar_t={hbar:.4f} < {g_hbar - 0.30:.4f}" if hbar < g_hbar - 0.30
+                           else f"batch_KL={log['batch_KL']:.4f} < {g_bkl * 0.5:.4f}")
+                    logger.info(f"[step {step}] COLLAPSE ABORT {why} (마지막 정상 평가 step={last_ok_eval_step})")
+                    break
+                if not guard_warned and hbar < g_hbar - 0.15:
+                    guard_warned = True
+                    logger.info(f"[step {step}] COLLAPSE WARN H_p_bar_t={hbar:.4f} < {g_hbar - 0.15:.4f}")
 
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
         if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
@@ -483,6 +570,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             for k, v in eval_log.items():
                 tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
+            if guard_on:
+                if eff_rank < g_rank * 0.7:
+                    logger.info(f"[step {step}] COLLAPSE ABORT eff_rank={eff_rank:.2f} < {g_rank * 0.7:.2f} "
+                                f"(마지막 정상 평가 step={last_ok_eval_step})")
+                    break
+                last_ok_eval_step = step
 
     if cfg["train"].get("save_checkpoint", True):
         ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"

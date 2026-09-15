@@ -21,12 +21,41 @@ def _ease(progress: float, shape: str) -> float:
 
 
 def teacher_temp_schedule(step: int, warmup_teacher_temp: float, teacher_temp: float, warmup_steps: int,
-                          shape: str = "linear") -> float:
-    """warmup_teacher_temp -> teacher_temp 증가, warmup_steps 이후 고정.
+                          shape: str = "linear", decay_start_step: int | None = None,
+                          decay_end_step: int | None = None, teacher_temp_final: float | None = None,
+                          decay_shape: str = "cosine") -> float:
+    """teacher 온도 3국면 스케줄 (R11-A1).
 
-    shape 기본값 "linear"는 기존 동작과 bit-identical(기존 config 보존).
+      1. step < warmup_steps                     : warmup_teacher_temp -> teacher_temp (shape)
+      2. warmup_steps <= step < decay_start_step : teacher_temp 유지 (plateau)
+      3. decay_start_step <= step < decay_end_step : teacher_temp -> teacher_temp_final (decay_shape)
+      4. step >= decay_end_step                  : teacher_temp_final 유지
+
+    teacher_temp_final=None(기본)이면 국면 3/4가 없어 r8과 bit-identical이다.
+
+    원리(METHOD 보강): DINO의 prototype softmax는 InfoNCE의 표본 softmax와 구조적으로
+    대응하므로 teacher 온도 인하 = 판별 해상도 상승이다. 원본 DINO는 0.04->0.07의 날카로운
+    설계점에서 작동하지만 이 프로젝트는 붕괴 때문에 0.135 plateau에 머물렀다. cov_iso가
+    응축을 막는 지금, 후반 재샤프닝이 판별 효과만 취할 수 있는지 시험한다.
+
+    방향은 강제하지 않는다 - teacher_temp_final > teacher_temp면 완화 대조군이 된다.
     """
     step = max(step, 0)
+    if teacher_temp_final is not None:
+        if decay_start_step is None:
+            raise ValueError("teacher_temp_final을 주면 decay_start_step도 필요하다")
+        if decay_start_step < warmup_steps:
+            raise ValueError(
+                f"decay_start_step({decay_start_step})이 warmup_steps({warmup_steps})보다 앞설 수 없다"
+            )
+        end = decay_end_step if decay_end_step is not None else decay_start_step
+        if end < decay_start_step:
+            raise ValueError(f"decay_end_step({end})이 decay_start_step({decay_start_step})보다 앞설 수 없다")
+        if step >= decay_start_step:
+            span = end - decay_start_step
+            progress = min(1.0, (step - decay_start_step) / span) if span > 0 else 1.0
+            return teacher_temp + (teacher_temp_final - teacher_temp) * _ease(progress, decay_shape)
+
     progress = min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
     return warmup_teacher_temp + (teacher_temp - warmup_teacher_temp) * _ease(progress, shape)
 
