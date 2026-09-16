@@ -80,6 +80,48 @@ def load_sentences(path) -> list[str]:
     return sentences
 
 
+class BatchIndexSampler:
+    """배치 문장 인덱스 공급기.
+
+    order="sample"(기본): 매 step random.sample - step 간 복원 추출이다. 기존 run과 bit-identical
+      하다: random.sample은 모집단 원소가 아니라 길이만 보고 위치를 고르므로, 문장 리스트 대신
+      인덱스로 뽑아도 같은 위치가 나온다(스크립트로 확인).
+    order="epoch": 셔플한 순열을 앞에서부터 잘라 쓰는 비복원 순회. 한 바퀴를 다 쓰면 재셔플한다.
+      복원 추출이면 wiki1m(985,723문장)에서 7700x32 step은 뽑기의 약 11%, 15600x32 step은 약 22%가
+      중복이라 긴 예산 비교에 교란이 된다. epoch 순회면 둘 다 한 바퀴 안이라 중복이 0이다.
+
+    문장 문자열이 아니라 인덱스를 돌려주는 이유: 역번역(paraphrase) 같은 문장 단위 부가 데이터를
+    같은 인덱스로 찾아야 하기 때문이다.
+    """
+
+    def __init__(self, n: int, batch_size: int, order: str = "sample", rng=random):
+        if order not in ("sample", "epoch"):
+            raise ValueError(f"unknown data_order: {order!r} (sample|epoch)")
+        if batch_size > n:
+            raise ValueError(f"batch_size({batch_size})가 문장 수({n})보다 크다")
+        self.n, self.batch_size, self.order, self.rng = n, batch_size, order, rng
+        self.epoch = 0
+        self._perm: list[int] = []
+        self._cursor = 0
+        if order == "epoch":
+            self._reshuffle()
+
+    def _reshuffle(self) -> None:
+        self._perm = list(range(self.n))
+        self.rng.shuffle(self._perm)
+        self._cursor = 0
+
+    def next(self) -> list[int]:
+        if self.order == "sample":
+            return self.rng.sample(range(self.n), self.batch_size)
+        if self._cursor + self.batch_size > self.n:   # 남은 조각은 버리고 다음 epoch로 - 배치 크기 고정
+            self.epoch += 1
+            self._reshuffle()
+        idx = self._perm[self._cursor:self._cursor + self.batch_size]
+        self._cursor += self.batch_size
+        return idx
+
+
 def _is_no_decay_param(name: str) -> bool:
     """bias 또는 정규화 레이어(LayerNorm/norm) 파라미터인지, 이름 기반으로 판정.
     BERT는 "LayerNorm.weight"/"...bias", ModernBERT는 bias 없이 "norm.weight"만 씀
@@ -376,8 +418,19 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         drift_sentences = [rank_eval_sentences[i] for i in drift_idx]
 
     student.train()
+    data_order = cfg["train"].get("data_order", "sample")
+    batch_sampler = BatchIndexSampler(len(sentences), batch_size, data_order)
+    if data_order == "epoch":
+        n_needed = max_steps * batch_size
+        logger.info(f"[train] data_order=epoch: {n_needed:,}문장 필요 / {len(sentences):,}문장 보유 "
+                    f"({n_needed / len(sentences):.2f} epoch)")
+
     for step in range(max_steps):
-        batch_sentences = random.sample(sentences, batch_size)
+        seen_epoch = batch_sampler.epoch
+        batch_idx = batch_sampler.next()
+        if batch_sampler.epoch != seen_epoch:
+            logger.info(f"[step {step}] DATA EPOCH {batch_sampler.epoch} 시작 (재셔플)")
+        batch_sentences = [sentences[i] for i in batch_idx]
         enc = tokenizer(
             batch_sentences, truncation=True, max_length=max_tokens, padding=True,
             return_special_tokens_mask=True, return_tensors="pt",
