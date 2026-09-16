@@ -179,4 +179,8 @@ run_name(=config 파일명)은 `<실험단계>_[<백본>]_<메커니즘><값>[_<
 2. **기준선 재측정이 최우선.** GPU·드라이버·커널이 바뀌면 수치가 달라진다(TF32 하나로 -0.0075 이동한 실측 있음). 챔피언 1500-step과 r14_7700을 새 서버에서 다시 돌리고, 이후 모든 비교는 이 서버 수치가 아니라 **새 서버 기준선**과 한다. 체크포인트도 이 과정에서 재생성된다.
 3. 이 서버 전용 절대경로(`/src/gs25058/...`)가 스크립트에 남아 있다: `scripts/compare_simcse.py`(HF_HUB), `scripts/run_r13_*.sh`·`run_r14.sh`·`run_r15.sh`(PY, UV_CACHE_DIR, HF_HOME), `scripts/plot_r14_vs_simcse.py`(MAIN). 환경변수화할 것.
 4. 부록 A-3/A-4의 GPU 규칙이 새 서버에 맞는지 사용자와 재확인.
-5. 로컬 전용이던 보고서·Optuna DB·로그(`results/`)와 체크포인트는 git으로 넘어오지 않는다. 사용자와 합의된 방식으로 별도 이관.
+5. 이관 방식(2026-09-16 합의):
+   - **git(`migrate/new-server`)**: `results/analysis/`의 보고서(.md)·그림(.png)·Optuna DB(.db)·trial CSV·JSON, `results/analysis_v2.md`, `results/summary.md`. `results/`는 여전히 gitignore 대상이라 `git add -f`로만 추적된다. `simcse_compare/curves_eval.csv`도 들어왔으니 `plot_r14_vs_simcse.py`의 MAIN 경로는 repo 내부로 바꾸면 된다.
+   - **git에 없음**: 학습 로그(`results/logs/`), TensorBoard, `results/plots/`, 임베딩 캐시(.npz), 비핵심 체크포인트(`checkpoints_archive/`, 이전 서버에만 존재).
+   - **체크포인트는 사용자가 수동 이관**: 이전 서버 `checkpoints/`에 핵심 7개만 남겨 두었다(약 5.5G) — `r12_bert_noise_optuna_t35_s{42,43}`, `r8_bert_coviso_sched_optuna_t50_s{42,43}`, `r14_bert_champ_7700_s{42,43}`(각 `last.pt`), `simcse_repro_1epoch_s42/best.pt`. 새 서버에서 `checkpoints/` 아래 같은 이름으로 두면 `eval_sts7.py` 등이 그대로 동작한다.
+   - `exp/r9-head-reinit`도 원격에 push했다. 그 밖의 로컬 브랜치(backbone-bert-base, backup-original-history-20260826, wip/pre-restructure-snapshot, worktree-tb-recent-launcher)는 이관하지 않았다.
