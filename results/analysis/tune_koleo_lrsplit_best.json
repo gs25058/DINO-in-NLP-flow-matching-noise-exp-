@@ -1,0 +1,10 @@
+{
+  "trial_number": 27,
+  "value": 0.6822,
+  "params": {
+    "loss.koleo_lambda": 0.42271015828660585,
+    "train.lr": 0.0001394211135782923,
+    "train.head_lr": 0.0007656584425369425,
+    "train.grad_clip": 5.211054806696876
+  }
+}

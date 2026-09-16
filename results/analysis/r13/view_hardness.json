@@ -1,0 +1,48 @@
+[
+  {
+    "setting": "iid t=0.425",
+    "pooled_cos": 0.9450128674507141,
+    "token_cos": 0.8410279750823975,
+    "t_lo": 0.425,
+    "t_hi": 0.425
+  },
+  {
+    "setting": "iid t=0.63",
+    "pooled_cos": 0.77119380235672,
+    "token_cos": 0.634722113609314,
+    "t_lo": 0.63,
+    "t_hi": 0.63
+  },
+  {
+    "setting": "rho=0.5 @t=0.425",
+    "pooled_cos": 0.9175270795822144,
+    "token_cos": 0.8409797549247742,
+    "t_lo": 0.425,
+    "t_hi": 0.425,
+    "noise_corr_rho": 0.5
+  },
+  {
+    "setting": "rho=1.0 @t=0.425",
+    "pooled_cos": 0.8879699110984802,
+    "token_cos": 0.8408735394477844,
+    "t_lo": 0.425,
+    "t_hi": 0.425,
+    "noise_corr_rho": 1.0
+  },
+  {
+    "setting": "cutoff 0.1 @t=0.425",
+    "pooled_cos": 0.8903040885925293,
+    "token_cos": 0.8409037590026855,
+    "t_lo": 0.425,
+    "t_hi": 0.425,
+    "cutoff_span_frac": 0.1
+  },
+  {
+    "setting": "cutoff 0.2 @t=0.425",
+    "pooled_cos": 0.8448967933654785,
+    "token_cos": 0.8407403230667114,
+    "t_lo": 0.425,
+    "t_hi": 0.425,
+    "cutoff_span_frac": 0.2
+  }
+]
