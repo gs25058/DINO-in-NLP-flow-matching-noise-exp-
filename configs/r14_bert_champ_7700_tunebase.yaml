@@ -1,0 +1,21 @@
+# R14 긴 예산 재튜닝 base (study space "r14_long_budget", 7700 step).
+#
+# r14_bert_champ_7700 결과: 두 시드 모두 step 3000 정점 후 끝까지 하락.
+#   s42 0.7357 -> 0.7161, s43 0.7286 -> 0.7039 (2시드 최종 0.7100 < 1500-step 챔피언 0.7333)
+#   최종 alignment 0.3087/0.3362, uniformity -3.697/-3.656(챔피언 -3.42보다 더 퍼짐), eff_rank 312/320
+# 1500-step에서 튜닝한 값이 5배 예산으로 옮겨가지 않는다 - cov_iso/momentum/lr/head_lr/teacher_temp를 7700에서 다시 찾는다.
+#
+# 붕괴 감시 기준값은 이 base 자신의 plateau(step 3465~7699, 2시드, scripts/measure_guard_refs.py)에서 잰 값이다.
+# batch_KL 조건은 끈다(ref 0 -> 중단선 0): 이 study는 cov_iso_lambda와 teacher_temp를 크게 흔드는데 batch_KL은
+# 그 두 축에 가장 민감하고(이 base의 plateau 0.2000은 1500-step 챔피언 0.0300의 7배), 이미 두 번 오발동했다.
+# 80분짜리 trial이 오발동으로 잘리면 틀린 낮은 점수가 TPE에 들어가 탐색 전체가 왜곡된다.
+# 진짜 균등 붕괴는 H(p_bar_t), rank 붕괴는 eff_rank가 잡는다.
+extends: r14_bert_champ_7700.yaml
+run_name: r14_bert_champ_7700_tunebase
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0041
+  eff_rank_ref: 316.89
+  batch_kl_ref: 0.0
+  start_frac: 0.2
+  patience: 3
