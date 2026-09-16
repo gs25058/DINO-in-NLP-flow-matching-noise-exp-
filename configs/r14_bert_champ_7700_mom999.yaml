@@ -1,0 +1,19 @@
+# R14 예산 스케일링 - 코드 변경 없이 챔피언(r12_bert_noise_optuna_t35, 1500 step, STS-B dev 0.7333)을 연장.
+#
+# 근거: 하네스 SimCSE 재현의 alignment 회복은 step 500~4000에서 일어났는데 이 프로젝트는 1500 step을
+# 넘겨본 적이 없다. 사전 등록 P-A1("eval 공간 alignment 힘이 없으면 연장해도 U자 회복 없음")을 판정한다.
+#
+# 스케줄 frac 키(LR warmup 0.052, teacher_temp warmup 0.079, momentum ramp 0.408, augment warmup 0.025)는
+# 그대로 둬 비율을 유지한다. cov_iso_start_step(56)은 절대값으로 남긴다 - EMA 통계 안정화 대기라
+# 비율이 아니라 절대 시간의 문제다.
+# data_order=epoch: 복원 추출이면 7700/15600 step에서 뽑기의 11%/22%가 중복이다. 한 바퀴 안에서 순회.
+# 가속(--batch-views --tf32)은 config가 아니라 실행기 플래그로 준다(수치가 머신 설정에 묶이지 않게).
+# momentum_end 0.9985 -> 0.999 (BSL 최적값). 긴 스케줄에서는 teacher가 더 느려야 한다는 문헌 근거 - P-14c.
+extends: r12_bert_noise_optuna_t35.yaml
+run_name: r14_bert_champ_7700_mom999
+train:
+  max_steps: 7700
+  data_order: epoch
+  momentum_end: 0.999
+eval:
+  every_steps: 500
