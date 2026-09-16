@@ -174,7 +174,9 @@ def build_param_groups(
 
 
 def build_augment(cfg: dict, mask_embed: torch.Tensor | None = None) -> FlowNoiseAug:
-    stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], weights_only=True)
+    # map_location: 통계 파일이 CUDA 텐서로 저장돼 있어 CPU 실행에서 그대로 로드하면 실패한다.
+    # FlowNoiseAug가 매 호출마다 입력 device로 옮기므로 GPU 실행 수치에는 영향이 없다.
+    stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], map_location="cpu", weights_only=True)
     a = cfg["augment"]
     warmup_steps = max(1, int(a["warmup_frac"] * cfg["train"]["max_steps"]))
     return FlowNoiseAug(
