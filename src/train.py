@@ -28,8 +28,8 @@ from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
-from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, EntropyCtrl,
-                      batch_kl_diagnostic, koleo_loss, velocity_loss)
+from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, EntropyCtrl, TokenLatentPredictor,
+                      batch_kl_diagnostic, koleo_loss, token_latent_loss, token_latent_targets, velocity_loss)
 from src.model import DinoTextModel, EMATeacher
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
@@ -131,7 +131,8 @@ def _is_no_decay_param(name: str) -> bool:
 
 
 def build_param_groups(
-    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool
+    student, velocity_head, lr: float, head_lr: float, weight_decay: float, exclude_ln_bias_wd: bool,
+    extra_heads: list | None = None,
 ) -> list[dict]:
     """backbone/head(+velocity_head) x decay/no-decay 4-way(또는 그 이하) param group 구성.
 
@@ -142,6 +143,8 @@ def build_param_groups(
     head_named = list(student.head.named_parameters())
     if velocity_head is not None:
         head_named += list(velocity_head.named_parameters())
+    for i, mod in enumerate(extra_heads or []):          # R15 토큰 예측기 등 - 없으면 기존과 동일
+        head_named += [(f"extra{i}.{n}", q) for n, q in mod.named_parameters()]
 
     if not exclude_ln_bias_wd and head_lr == lr:
         all_params = [p for _, p in backbone_named + head_named]
@@ -185,7 +188,19 @@ def build_augment(cfg: dict, mask_embed: torch.Tensor | None = None) -> FlowNois
         cutoff_prob=a.get("cutoff_prob", 1.0),
         cutoff_mode=a.get("cutoff_mode", "drop"),
         mask_embed=mask_embed,
+        # R15: 마스킹은 token_latent_lambda > 0일 때만 켠다. token_latent_views의 기본값이 1이라
+        # 람다와 무관하게 켜면 lambda=0에서도 뷰가 바뀌어 기존 run과 달라진다.
+        token_latent_views=token_latent_views(cfg),
+        mask_ratio=a.get("mask_ratio", 0.15),
+        mask_then_noise=a.get("mask_then_noise", True),
     )
+
+
+def token_latent_views(cfg: dict) -> int:
+    """R15 마스킹 뷰 수. token_latent_lambda가 0이면 항상 0 (기존과 bit-identical)."""
+    if cfg["loss"].get("token_latent_lambda", 0.0) <= 0:
+        return 0
+    return cfg["augment"].get("token_latent_views", 1)
 
 
 def main():
@@ -259,7 +274,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
     # cutoff_mode="mask"일 때만 필요한 [MASK] 임베딩. 그 외에는 None이라 비용이 없다.
     mask_embed = None
-    if cfg["augment"].get("cutoff_span_frac", 0.0) > 0 and cfg["augment"].get("cutoff_mode") == "mask":
+    if (cfg["augment"].get("cutoff_span_frac", 0.0) > 0 and cfg["augment"].get("cutoff_mode") == "mask") \
+            or token_latent_views(cfg) > 0:
         mask_embed = student.get_input_embeddings()(
             torch.tensor([tokenizer.mask_token_id], device=device)
         )[0].detach().clone()
@@ -286,11 +302,21 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         ).to(device)
 
+    # R15 토큰 latent 예측. lambda=0(기본)이면 예측기도 없고 teacher도 hidden을 반환하지 않는다.
+    tok_lambda = cfg["loss"].get("token_latent_lambda", 0.0)
+    tok_top_k = cfg["loss"].get("token_latent_top_k", 6)
+    token_predictor = None
+    if tok_lambda > 0:
+        token_predictor = TokenLatentPredictor(student.backbone.config.hidden_size).to(device)
+        if velocity_head is not None:
+            raise ValueError("token_latent_lambda와 velocity_head를 함께 쓰는 경우는 검증되지 않았다")
+
     head_lr = cfg["train"].get("head_lr", cfg["train"]["lr"])
     exclude_ln_bias_wd = cfg["train"].get("exclude_ln_bias_wd", False)
     grad_clip = cfg["train"].get("grad_clip")
     param_groups = build_param_groups(
-        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd
+        student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd,
+        extra_heads=[token_predictor] if token_predictor is not None else None,
     )
     optimizer = torch.optim.AdamW(param_groups)
     all_trainable_params = [p for g in param_groups for p in g["params"]]
@@ -453,14 +479,20 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         token_embeds = student.get_input_embeddings()(input_ids)
         views = aug(token_embeds, special_mask, step, attention_mask)
 
+        tok_target = None
         with torch.no_grad():
-            t_embedding, t_logits, *_ = teacher(
+            t_out = teacher(
                 inputs_embeds=views.teacher_embeds, attention_mask=attention_mask,
-                embed_push=embed_uniform_push.push,
+                embed_push=embed_uniform_push.push, return_all_hidden=token_predictor is not None,
             )
+            t_embedding, t_logits = t_out[0], t_out[1]
+            if token_predictor is not None:
+                # teacher는 깨끗한 원문(t=0)을 보므로 마스크 위치의 teacher latent가 공짜 목표다.
+                tok_target = token_latent_targets(t_out[4], tok_top_k)
         embed_push_grad_norm = embed_uniform_push.step(t_embedding)
 
         student_logits = []
+        tok_losses, tok_coss = [], []
         student_embeds_norm = []   # pos_cos_raw 진단용(정규화된 pooled). r10에서 이 로깅만 이식.
         vel_losses = []
         koleo_losses = []
@@ -488,6 +520,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=s_mask)
             student_logits.append(s_logits)
             student_embeds_norm.append(s_embedding)
+            if tok_target is not None and views.student_token_masks is not None \
+                    and views.student_token_masks[k] is not None:
+                l_tok, c_tok = token_latent_loss(token_predictor(s_hidden), tok_target,
+                                                 views.student_token_masks[k])
+                tok_losses.append(l_tok)
+                tok_coss.append(c_tok)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
@@ -529,6 +567,11 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             aux["L_iso"] = l_iso_total.detach()
             aux["L_iso_mean"] = torch.stack(cov_iso_mean_terms).mean()
             aux["L_iso_cov"] = torch.stack(cov_iso_cov_terms).mean()
+        if tok_losses:
+            l_tok = torch.stack(tok_losses).mean()
+            total_loss = total_loss + tok_lambda * l_tok
+            aux["L_tok"] = l_tok.detach()
+            aux["tok_cos"] = torch.stack(tok_coss).mean()
 
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
@@ -592,6 +635,9 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                     log["H_target"] = tgt
             if "L_vel" in aux:
                 log["L_vel"] = aux["L_vel"].item()
+            if "L_tok" in aux:
+                log["L_tok"] = aux["L_tok"].item()
+                log["tok_cos"] = aux["tok_cos"].item()     # 마스크 위치 예측-목표 코사인 (정확도 대리)
             if "L_koleo" in aux:
                 log["L_koleo"] = aux["L_koleo"].item()
             if koleo_lambda_max > 0:
@@ -697,11 +743,14 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     if cfg["train"].get("save_checkpoint", True):
         ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
+        ckpt = {
             "state_dict": student.state_dict(),
             "model_cfg": cfg["model"],
             "teacher_state_dict": teacher.model.state_dict(),
-        }, ckpt_path)
+        }
+        if token_predictor is not None:
+            ckpt["token_predictor_state_dict"] = token_predictor.state_dict()
+        torch.save(ckpt, ckpt_path)
         logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 
     opt = cfg.get("_optuna")

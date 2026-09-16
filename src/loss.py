@@ -322,3 +322,46 @@ class EntropyCtrl:
         factor = min(max(factor, 1.0 - self.max_step), 1.0 + self.max_step)   # 스텝당 상대 변화 제한
         self.tau = min(max(self.tau * factor, self.tau_min), self.tau_max)
         return self.tau
+
+
+class TokenLatentPredictor(nn.Module):
+    """R15: student 마지막 층 토큰 hidden -> teacher 토큰 latent 목표 회귀용 2층 MLP (D->D->D, GELU)."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.net(h)
+
+
+def token_latent_targets(hidden_states, top_k: int) -> torch.Tensor:
+    """R15 teacher 목표: 상위 top_k 층 hidden state 평균 후 토큰별 instance norm (data2vec 관례).
+
+    hidden_states: HF output_hidden_states 튜플 (임베딩 출력, 1층, ..., 마지막 층), 각 [B, L, D].
+    정규화는 affine 없이 각 토큰 벡터를 D축으로 표준화한다(평균 0, 분산 1). 목표의 스케일이 층마다,
+    학습 시점마다 달라지는 것을 막아 회귀가 스케일 맞추기로 흐르지 않게 한다.
+    목표로 gradient가 흐르면 안 되므로 항상 detach한다(teacher가 no_grad여도 방어적으로).
+    """
+    if not 1 <= top_k <= len(hidden_states) - 1:
+        raise ValueError(f"top_k({top_k})는 1 이상, 층 수({len(hidden_states) - 1}) 이하여야 한다")
+    avg = torch.stack(tuple(hidden_states[-top_k:]), dim=0).mean(dim=0)
+    return F.layer_norm(avg, (avg.shape[-1],)).detach()
+
+
+def token_latent_loss(pred: torch.Tensor, target: torch.Tensor,
+                      token_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """마스크 위치에서만 smooth-L1(beta=1)을 평균한다. (loss, 마스크 위치 예측 코사인 평균)을 준다.
+
+    pred/target: [B, L, D], token_mask: [B, L] bool. 코사인은 정확도 대리 지표라 no_grad로 잰다.
+    마스크 위치가 하나도 없으면 0을 준다(학습 그래프는 유지).
+    """
+    sel = token_mask.bool()
+    if not sel.any():
+        zero = pred.sum() * 0.0
+        return zero, zero.detach()
+    p, y = pred[sel], target[sel]                       # [N, D]
+    loss = F.smooth_l1_loss(p, y, beta=1.0, reduction="none").mean(dim=-1).mean()
+    with torch.no_grad():
+        cos = F.cosine_similarity(p, y, dim=-1).mean()
+    return loss, cos

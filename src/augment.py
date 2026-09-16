@@ -21,6 +21,9 @@ class NoiseViews:
     # R12-B2 span cutoff가 켜졌을 때만 채워진다. None이면 학습 루프가 원본 attention_mask를
     # 그대로 쓰므로 기존 동작과 동일하다.
     student_masks: list[torch.Tensor] | None = None
+    # R15 토큰 latent 예측: 뷰별 [MASK] 치환 위치 [B, L] bool. 마스킹하지 않는 뷰는 None,
+    # 기능이 꺼져 있으면 리스트 자체가 None.
+    student_token_masks: list[torch.Tensor | None] | None = None
 
 
 class FlowNoiseAug:
@@ -30,7 +33,8 @@ class FlowNoiseAug:
                  warmup_steps: int, delta_t: float,
                  noise_corr_rho: float = 0.0,
                  cutoff_span_frac: float = 0.0, cutoff_prob: float = 1.0,
-                 cutoff_mode: str = "drop", mask_embed: torch.Tensor | None = None):
+                 cutoff_mode: str = "drop", mask_embed: torch.Tensor | None = None,
+                 token_latent_views: int = 0, mask_ratio: float = 0.15, mask_then_noise: bool = True):
         """mu, sigma: [D], scripts/prepare_data.py가 계산해 캐시한 값.
 
         R12 신규(둘 다 기본값이 off이며 그때 기존과 bit-identical):
@@ -40,6 +44,11 @@ class FlowNoiseAug:
         assert mode in ("anchor", "consistency"), f"unknown mode: {mode}"
         assert 0.0 <= noise_corr_rho <= 1.0, f"noise_corr_rho는 [0,1]: {noise_corr_rho}"
         assert cutoff_mode in ("drop", "mask"), f"unknown cutoff_mode: {cutoff_mode}"
+        assert 0 <= token_latent_views <= num_student_views, \
+            f"token_latent_views({token_latent_views})는 0~num_student_views({num_student_views})"
+        if token_latent_views > 0:
+            assert 0.0 < mask_ratio < 1.0, f"mask_ratio는 (0,1): {mask_ratio}"
+            assert mask_embed is not None, "token_latent_views > 0이면 mask_embed([MASK] 임베딩)가 필요하다"
         self.mu = mu
         self.sigma = sigma
         self.mode = mode
@@ -54,6 +63,9 @@ class FlowNoiseAug:
         self.cutoff_prob = cutoff_prob
         self.cutoff_mode = cutoff_mode
         self.mask_embed = mask_embed
+        self.token_latent_views = token_latent_views
+        self.mask_ratio = mask_ratio
+        self.mask_then_noise = mask_then_noise
 
     def t_hi(self, step: int) -> float:
         """curriculum: t_start -> t_max 선형 증가, warmup_steps 이후 고정.
@@ -99,6 +111,25 @@ class FlowNoiseAug:
             else:
                 new_embeds[b, sl] = self.mask_embed.to(device=embeds.device, dtype=embeds.dtype)
         return new_embeds, new_mask
+
+    def _choose_token_mask(self, special_mask: torch.Tensor,
+                           attention_mask: torch.Tensor | None) -> torch.Tensor:
+        """R15: 문장마다 비특수 토큰의 mask_ratio만큼을 무작위로 고른다 [B, L] bool.
+
+        개수는 문장별 max(1, floor(ratio * n_valid + 0.5))로 정확히 맞춘다(유효 토큰이 0이면 0).
+        확률적으로 뽑지 않고 개수를 고정하는 이유는, 짧은 문장에서 마스크가 0개가 되어 그 문장이
+        목표에 기여하지 못하는 일을 막기 위해서다. CLS/SEP/pad는 절대 고르지 않는다.
+        """
+        valid = ~special_mask.bool()
+        if attention_mask is not None:
+            valid &= attention_mask.bool()
+        n_valid = valid.sum(dim=1)
+        counts = torch.clamp(torch.floor(n_valid.float() * self.mask_ratio + 0.5), min=1).long()
+        counts = torch.where(n_valid > 0, torch.minimum(counts, n_valid), torch.zeros_like(counts))
+        scores = torch.rand(valid.shape, device=valid.device)
+        scores = scores.masked_fill(~valid, float("inf"))          # 무효 위치는 항상 순위 밖
+        ranks = scores.argsort(dim=1).argsort(dim=1)
+        return (ranks < counts.unsqueeze(1)) & valid
 
     def __call__(self, token_embeds: torch.Tensor,
                  special_mask: torch.Tensor, step: int,
@@ -149,11 +180,15 @@ class FlowNoiseAug:
             rho = self.noise_corr_rho
             return math.sqrt(rho) * shared + math.sqrt(1.0 - rho) * ind
 
-        def make_view(t_vec: torch.Tensor, eps: torch.Tensor | None = None):
+        def make_view(t_vec: torch.Tensor, eps: torch.Tensor | None = None,
+                      x_src: torch.Tensor | None = None):
+            """x_src를 주면 그 임베딩(예: [MASK] 치환본)을 표준화해 보간한다. None이면 공유 x_hat -
+            기존 경로와 연산·난수 소비가 완전히 같다."""
             if eps is None:
                 eps = sample_eps()
             t_b = t_vec.view(B, 1, 1)
-            x_t = (1 - t_b) * x_hat + t_b * eps
+            src_hat = x_hat if x_src is None else (x_src - mu) / sigma
+            x_t = (1 - t_b) * src_hat + t_b * eps
             x_noised = x_t * sigma + mu
             embeds = torch.where(keep, token_embeds, x_noised)
             return embeds, eps
@@ -161,9 +196,23 @@ class FlowNoiseAug:
         student_embeds: list[torch.Tensor] = []
         t_students: list[torch.Tensor] = []
         eps_list: list[torch.Tensor] = []
-        for _ in range(self.num_student_views):
+        student_token_masks = [None] * self.num_student_views if self.token_latent_views > 0 else None
+        for k in range(self.num_student_views):
             t_s = sample_t()
-            embeds_s, eps_s = make_view(t_s)
+            if student_token_masks is not None and k < self.token_latent_views:
+                # R15: 이 뷰는 비특수 토큰 일부를 [MASK]로 바꾼다. teacher는 깨끗한 원문이라
+                # 마스크 위치의 teacher latent가 곧 회귀 목표다.
+                tmask = self._choose_token_mask(special_mask, attention_mask)
+                m = self.mask_embed.to(device=device, dtype=dtype)
+                if self.mask_then_noise:
+                    masked = torch.where(tmask.unsqueeze(-1), m, token_embeds)
+                    embeds_s, eps_s = make_view(t_s, x_src=masked)
+                else:
+                    embeds_s, eps_s = make_view(t_s)
+                    embeds_s = torch.where(tmask.unsqueeze(-1), m, embeds_s)
+                student_token_masks[k] = tmask
+            else:
+                embeds_s, eps_s = make_view(t_s)
             student_embeds.append(embeds_s)
             t_students.append(t_s)
             eps_list.append(eps_s)
@@ -195,4 +244,5 @@ class FlowNoiseAug:
             eps=eps_list,
             x0_std=x_hat,
             student_masks=student_masks,
+            student_token_masks=student_token_masks,
         )

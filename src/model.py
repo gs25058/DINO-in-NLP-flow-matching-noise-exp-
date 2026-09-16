@@ -76,7 +76,8 @@ class DinoTextModel(nn.Module):
         return self.backbone.get_input_embeddings()
 
     def forward(self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor,
-                embed_push: torch.Tensor | None = None, pooling: str = "last"):
+                embed_push: torch.Tensor | None = None, pooling: str = "last",
+                return_all_hidden: bool = False):
         """embed_push: teacher 쪽 mean-pooled embedding에 더하는 uniformity push 벡터
         (centering-uniform-push 브랜치, embed_uniform_push_lr 실험용). None이면(기본) 기존과
         완전히 동일 - 기존 config 재현성 유지.
@@ -94,7 +95,9 @@ class DinoTextModel(nn.Module):
             hidden = out.last_hidden_state
             pool_input = (out.hidden_states[0] + out.hidden_states[-1]) / 2
         elif pooling in ("last", "cls"):
-            hidden = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
+            out = self.backbone(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+                                output_hidden_states=return_all_hidden)
+            hidden = out.last_hidden_state
             pool_input = hidden
         else:
             raise ValueError(f"unknown pooling: {pooling}")
@@ -106,6 +109,9 @@ class DinoTextModel(nn.Module):
         logits = self.head(pooled)                     # DINO loss 전용
         # pooled(정규화 전)는 r10 BYOL식 predictor 입력용으로 추가한 4번째 반환값이다.
         # 기존 호출부는 앞 3개만 언패킹하므로 동작은 그대로다.
+        if return_all_hidden:
+            # R15 토큰 latent 목표용: (임베딩 출력, 1층, ..., 마지막 층). 기본 호출은 4-tuple 그대로다.
+            return embedding, logits, hidden, pooled, out.hidden_states
         return embedding, logits, hidden, pooled       # hidden: velocity head(§4.2, R4)용 토큰별 출력(항상 last)
 
 
