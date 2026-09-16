@@ -1,0 +1,19 @@
+# R15 토큰 수준 masked latent 예측 (data2vec/iBOT식): lambda=2.0, mask_ratio=0.15, top_k=6.
+#
+# 근거: 문장 수준 DINO CE는 pooled alignment에 압력이 없다(R10/R13). 토큰 재구성 목표는 negative 없이
+# unsup-SimCSE에 도달한 유일한 joint-embedding 경로(data2vec)이고 PaSeR(76.16)의 생성적 재구성과 같은 계열.
+# teacher는 이미 깨끗한 입력(t=0)을 받으므로 목표가 공짜다.
+# student 뷰 1개의 비특수 토큰 0.15를 [MASK]로 바꾼 뒤 노이즈 적용, 상위 6층 평균 + 토큰별 instance norm 목표를
+# 2층 MLP로 smooth-L1 회귀(마스크 위치만).
+#
+# 사전 등록: P-15a alignment 개선 >= 0.02 & uniformity가 -2.6보다 나빠지지 않음 / P-15b 7-task +1.5 이상 /
+#            P-15c(실패) L_tok은 내려가는데 alignment 무반응.
+extends: r15_base.yaml
+run_name: r15_bert_tok_lam2.0
+loss:
+  token_latent_lambda: 2.0
+  token_latent_top_k: 6
+augment:
+  token_latent_views: 1
+  mask_ratio: 0.15
+  mask_then_noise: true

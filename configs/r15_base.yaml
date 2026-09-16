@@ -1,0 +1,12 @@
+# R15 공통 base - R14 게이트 결과로 확정한다.
+#
+# GATE: PENDING   <- 이 줄이 있으면 scripts/run_r15.sh가 시작을 거부한다.
+#
+# 확정 절차 (사전 등록, results/analysis/r14_r17/report.md):
+#   1. extends: P-14c(0.999 arm이 step>4000 후반 STS 우위)면 r14_bert_champ_7700_mom999, 아니면 r14_bert_champ_7700
+#   2. P-14a(alignment < 0.27 by step 4000 + STS 단조 상승)면 15600 결과를 본 뒤 확정, P-14b면 7700 base로 즉시 확정
+#   3. collapse_guard 기준값을 base 자신의 plateau(2시드)로 다시 잰다 - R13에서 다른 계보의 값을 재사용해
+#      챔피언 자신이 붕괴로 판정된 사고가 있었다. 재사용 금지.
+#   4. 위 GATE 줄을 지우고 판정 근거를 여기 남긴다.
+extends: r14_bert_champ_7700.yaml
+run_name: r15_base
