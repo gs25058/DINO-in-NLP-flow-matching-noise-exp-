@@ -159,6 +159,23 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "augment.noise_corr_rho": ("float", {"low": 0.05, "high": 1.0}),
         "_t_scale": ("float", {"low": 0.6, "high": 1.3}),
     },
+    # R14 긴 예산(7700 step) 재튜닝. 1500-step 챔피언을 비율 그대로 7700으로 늘리면 두 시드 모두 step 3000
+    # 부근에서 STS가 정점을 찍고 내려간다(s42 0.7357 -> 0.7246 @4500, s43 0.7286 -> 0.7165). 그동안 alignment는
+    # 0.25에서 0.28~0.30으로 되돌아가고 eff_rank는 계속 오른다 - 1500 step에서 잡은 값이 5배 예산으로 옮겨가지 않는다.
+    # 누적 효과가 큰 축만 연다:
+    #   cov_iso_lambda  rank는 오르는데 alignment가 나빠지는 모양은 등방 압력 과잉의 신호. 아래쪽을 넓게 연다.
+    #   momentum_end    긴 스케줄은 teacher가 더 느려야 한다는 문헌 근거(BSL 0.999, 사전 등록 P-14c).
+    #   lr / head_lr    총 갱신량이 5배라 최적 크기가 달라질 수 있다. 챔피언 값 기준 +-3배.
+    #   teacher_temp    plateau 값이 학습 전 구간에 걸린다. student(0.151) 약간 위까지 - 이전 스케줄 study 상위권에
+    #                   0.155가 있었다. warmup 쪽 온도 키는 초반 600 step에만 작용해 제외.
+    # 반드시 --max-steps 7700으로 돌린다. 짧은 예산에서는 하락이 드러나지도 않는다(정점 step 3000).
+    "r14_long_budget": {
+        "loss.cov_iso_lambda": ("float", {"low": 0.3, "high": 8.0, "log": True}),
+        "train.momentum_end": ("float", {"low": 0.998, "high": 0.9995}),
+        "train.lr": ("float", {"low": 2.3e-5, "high": 2.1e-4, "log": True}),
+        "train.head_lr": ("float", {"low": 1.9e-4, "high": 1.75e-3, "log": True}),
+        "loss.teacher_temp": ("float", {"low": 0.09, "high": 0.18}),
+    },
     "flow_noise_t": {
         "augment.t_lo": ("float", {"low": 0.0, "high": 0.6}),
         "_t_span": ("float", {"low": 0.05, "high": 0.6}),      # t_max = t_lo + span (1.0 상한 clip)
@@ -305,7 +322,9 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
 
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)}
         result = subprocess.run(
-            ["uv", "run", "python", "-m", "src.train", "--config", tmp_path],
+            # uv run 대신 이 스크립트를 돌리는 인터프리터를 그대로 쓴다. uv run은 cwd의 프로젝트 환경을
+            # 찾아 동기화하므로, venv가 없는 worktree에서 돌리면 trial마다 5.6GB venv를 새로 만든다(R13 실측).
+            [sys.executable, "-m", "src.train", "--config", tmp_path],
             cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=timeout,
         )
     finally:

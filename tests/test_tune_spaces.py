@@ -137,3 +137,23 @@ def test_r13_view_cutoff_stays_in_range():
 def test_r13_spaces_have_derived_hooks_where_needed():
     assert "r13_sharpen_ctrl" in tune.DERIVED and "r13_view_corr" in tune.DERIVED
     assert "r13_view_cutoff" not in tune.DERIVED      # 의사 파라미터가 없다
+
+
+def test_r14_long_budget_brackets_the_champion_and_keeps_temps_ordered():
+    """재튜닝 공간은 현 챔피언 값을 안쪽에 포함해야 하고(비교가 성립), teacher 온도는 warmup 시작값보다 커야 한다."""
+    space = tune.SEARCH_SPACES["r14_long_budget"]
+    champion = {"loss.cov_iso_lambda": 5.874, "train.momentum_end": 0.9985, "train.lr": 6.876e-5,
+                "train.head_lr": 5.825e-4, "loss.teacher_temp": 0.1348}
+    for key, val in champion.items():
+        kind, kw = space[key]
+        assert kw["low"] < val < kw["high"], (key, val, kw)
+    assert space["loss.teacher_temp"][1]["low"] > 0.0494          # warmup_teacher_temp보다 위
+    assert 0.999 < space["train.momentum_end"][1]["high"]          # P-14c의 0.999를 포함
+    assert "r14_long_budget" not in tune.DERIVED
+
+
+def test_trials_launch_with_the_current_interpreter():
+    """uv run으로 띄우면 venv 없는 worktree에서 trial마다 venv를 새로 만든다 - sys.executable을 써야 한다."""
+    src = (ROOT / "scripts" / "tune.py").read_text(encoding="utf-8")
+    assert "[sys.executable, \"-m\", \"src.train\"" in src
+    assert "[\"uv\", \"run\", \"python\", \"-m\", \"src.train\"" not in src
