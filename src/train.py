@@ -28,9 +28,10 @@ from src.augment import FlowNoiseAug
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
-from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, EntropyCtrl, TokenLatentPredictor,
-                      batch_kl_diagnostic, koleo_loss, token_latent_loss, token_latent_targets, velocity_loss)
-from src.model import DinoTextModel, EMATeacher
+from src.loss import (CovIsoPenalty, DINOLoss, EmbedUniformPush, EntropyCtrl, IBOTLambdaCtrl, IBOTTokenLoss,
+                      TokenLatentPredictor, batch_kl_diagnostic, koleo_loss, token_latent_loss,
+                      token_latent_targets, velocity_loss)
+from src.model import DinoTextModel, EMATeacher, IBOTTokenHeads
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -122,6 +123,13 @@ class BatchIndexSampler:
         return idx
 
 
+def _grad_norm(loss: torch.Tensor, params: list) -> float:
+    """loss의 params에 대한 기울기 L2 노름. 그래프를 유지하므로 뒤이은 본 backward에 영향이 없다."""
+    grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    sq = [g.pow(2).sum() for g in grads if g is not None]
+    return float(torch.stack(sq).sum().sqrt()) if sq else 0.0
+
+
 def _is_no_decay_param(name: str) -> bool:
     """bias 또는 정규화 레이어(LayerNorm/norm) 파라미터인지, 이름 기반으로 판정.
     BERT는 "LayerNorm.weight"/"...bias", ModernBERT는 bias 없이 "norm.weight"만 씀
@@ -198,9 +206,14 @@ def build_augment(cfg: dict, mask_embed: torch.Tensor | None = None) -> FlowNois
     )
 
 
+def ibot_enabled(cfg: dict) -> bool:
+    """R18 iBOT 토큰 CE가 켜졌는가. ibot_lambda > 0 이거나 grad_ratio로 lambda를 자동 조정할 때."""
+    return cfg["loss"].get("ibot_lambda", 0.0) > 0 or cfg["loss"].get("ibot_grad_ratio") is not None
+
+
 def token_latent_views(cfg: dict) -> int:
-    """R15 마스킹 뷰 수. token_latent_lambda가 0이면 항상 0 (기존과 bit-identical)."""
-    if cfg["loss"].get("token_latent_lambda", 0.0) <= 0:
+    """마스킹 뷰 수(R15 토큰 latent 회귀, R18 iBOT 토큰 CE가 공유). 둘 다 꺼져 있으면 항상 0 (기존과 bit-identical)."""
+    if cfg["loss"].get("token_latent_lambda", 0.0) <= 0 and not ibot_enabled(cfg):
         return 0
     return cfg["augment"].get("token_latent_views", 1)
 
@@ -313,12 +326,29 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         if velocity_head is not None:
             raise ValueError("token_latent_lambda와 velocity_head를 함께 쓰는 경우는 검증되지 않았다")
 
+    # R18 iBOT 토큰 CE. 꺼져 있으면(기본) 토큰 head/손실/제어기 모두 None이라 기존 경로 그대로다.
+    ibot_heads = ibot_loss = ibot_ctrl = None
+    ibot_lambda = cfg["loss"].get("ibot_lambda", 0.0)
+    if ibot_enabled(cfg):
+        if token_predictor is not None:
+            raise ValueError("token_latent_lambda(R15)와 ibot(R18)을 함께 쓰는 경우는 검증되지 않았다")
+        ibot_heads = IBOTTokenHeads(student, teacher, cfg["loss"].get("ibot_head", "shared"))
+        ibot_loss = IBOTTokenLoss(
+            cfg["model"]["head"]["logit_dim"], cfg["loss"]["center_momentum"],
+            use_token_center=cfg["loss"].get("ibot_use_token_center", True),
+        ).to(device)
+        if cfg["loss"].get("ibot_grad_ratio") is not None:
+            ibot_ctrl = IBOTLambdaCtrl(cfg["loss"]["ibot_grad_ratio"], init_lambda=ibot_lambda if ibot_lambda > 0 else 1.0)
+            ibot_lambda = ibot_ctrl.lam
+
     head_lr = cfg["train"].get("head_lr", cfg["train"]["lr"])
     exclude_ln_bias_wd = cfg["train"].get("exclude_ln_bias_wd", False)
     grad_clip = cfg["train"].get("grad_clip")
+    extra_heads = ([token_predictor] if token_predictor is not None else []) + \
+        (ibot_heads.trainable_modules() if ibot_heads is not None else [])
     param_groups = build_param_groups(
         student, velocity_head, cfg["train"]["lr"], head_lr, cfg["train"]["weight_decay"], exclude_ln_bias_wd,
-        extra_heads=[token_predictor] if token_predictor is not None else None,
+        extra_heads=extra_heads or None,
     )
     optimizer = torch.optim.AdamW(param_groups)
     all_trainable_params = [p for g in param_groups for p in g["params"]]
@@ -495,6 +525,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         student_logits = []
         tok_losses, tok_coss = [], []
+        ibot_s_logits, ibot_t_logits = [], []
         student_embeds_norm = []   # pos_cos_raw 진단용(정규화된 pooled). r10에서 이 로깅만 이식.
         vel_losses = []
         koleo_losses = []
@@ -528,6 +559,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                                                  views.student_token_masks[k])
                 tok_losses.append(l_tok)
                 tok_coss.append(c_tok)
+            if ibot_heads is not None and views.student_token_masks is not None \
+                    and views.student_token_masks[k] is not None:
+                # R18: 같은 마스크 위치에서 student(마스킹+노이즈 뷰)와 teacher(깨끗한 원문) 토큰 로짓.
+                tmask = views.student_token_masks[k]
+                ibot_s_logits.append(ibot_heads.student_logits(s_hidden, tmask))
+                ibot_t_logits.append(ibot_heads.teacher_logits(t_out[2], tmask))
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
                 vel_losses.append(velocity_loss(v_pred, views.eps[k], views.x0_std, special_mask))
@@ -574,6 +611,19 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             total_loss = total_loss + tok_lambda * l_tok
             aux["L_tok"] = l_tok.detach()
             aux["tok_cos"] = torch.stack(tok_coss).mean()
+        l_ibot = None
+        ibot_grad_log = {}
+        if ibot_loss is not None:
+            l_ibot, ibot_aux = ibot_loss(ibot_t_logits, ibot_s_logits, teacher_temp, student_temp)
+            if ibot_ctrl is not None and step % log_every == 0:
+                # 문장 CE와 iBOT 항(lambda 곱하기 전)의 backbone 기울기 노름을 따로 재서 lambda를 맞춘다.
+                # 측정 스텝(log_every마다)에서만 backward가 2회 추가된다.
+                bb_params = [p for p in student.backbone.parameters() if p.requires_grad]
+                g_ce, g_tok = _grad_norm(loss, bb_params), _grad_norm(l_ibot, bb_params)
+                ibot_lambda = ibot_ctrl.observe(g_ce, g_tok)
+                ibot_grad_log = {"ibot_g_ce": g_ce, "ibot_g_tok": g_tok,
+                                 "ibot_grad_ratio_obs": ibot_lambda * g_tok / g_ce if g_ce > 0 else float("nan")}
+            total_loss = total_loss + ibot_lambda * l_ibot
 
         if diag_tbin_kl:
             for k, t_k in enumerate(views.t_students):
@@ -617,6 +667,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             teacher.momentum = teacher_momentum_schedule(step, momentum_start, momentum_end,
                                                          momentum_ramp_steps, momentum_shape)
         teacher.update(student)
+        if ibot_heads is not None:
+            ibot_heads.update()
 
         if step % log_every == 0 or step == max_steps - 1:
             with torch.no_grad():
@@ -640,6 +692,13 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             if "L_tok" in aux:
                 log["L_tok"] = aux["L_tok"].item()
                 log["tok_cos"] = aux["tok_cos"].item()     # 마스크 위치 예측-목표 코사인 (정확도 대리)
+            if l_ibot is not None:
+                log["L_ibot"] = l_ibot.item()
+                log["H_pt_tok"] = float(ibot_aux["H_pt_tok"])        # teacher 토큰 분포 엔트로피 평균
+                log["H_p_bar_tok"] = float(ibot_aux["H_p_bar_tok"])  # 토큰 프로토타입 사용 균형
+                log["KL_tok"] = float(ibot_aux["KL_tok"])
+                log["ibot_lambda"] = ibot_lambda                     # 유효 lambda (grad_ratio면 자동 조정값)
+                log.update(ibot_grad_log)
             if "L_koleo" in aux:
                 log["L_koleo"] = aux["L_koleo"].item()
             if koleo_lambda_max > 0:
@@ -752,6 +811,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         }
         if token_predictor is not None:
             ckpt["token_predictor_state_dict"] = token_predictor.state_dict()
+        if ibot_loss is not None:
+            # 토큰 center는 사후 프로토타입 할당 분석(teacher 분포 재현)에 필요하다.
+            ckpt["ibot_token_center"] = ibot_loss.token_center.detach().cpu()
+            if ibot_heads.head is not None:     # separate head는 student state_dict 밖에 있다(strict load 호환)
+                ckpt["ibot_head_state_dict"] = ibot_heads.head.state_dict()
+                ckpt["ibot_teacher_head_state_dict"] = ibot_heads.teacher_head.model.state_dict()
         torch.save(ckpt, ckpt_path)
         logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 

@@ -133,3 +133,46 @@ class EMATeacher:
     def __call__(self, *args, **kwargs):
         with torch.no_grad():
             return self.model(*args, **kwargs)
+
+
+class IBOTTokenHeads:
+    """R18 iBOT식 토큰 경로: 마스크 위치의 마지막 층 hidden [N_mask, D] -> 프로토타입 로짓 [N_mask, K].
+
+    pooled(문장) 경로는 건드리지 않는다 - 토큰 로짓은 forward가 이미 돌려주는 hidden에서 따로 만든다.
+
+    mode="shared"(기본): 문장 DINO head를 그대로 쓴다. teacher 쪽은 teacher.model.head(이미 EMA 대상).
+    mode="separate"(R18b, DINOv2 방식): 별도 DINOHead 인스턴스와 그 EMA 사본을 둔다. student 모듈의
+    submodule로 넣지 않는 이유는 checkpoint state_dict를 기존 로더(strict load)와 호환되게 두기 위해서다 -
+    train.py가 별도 키로 저장하고 optimizer에는 extra_heads로 넣는다.
+    """
+
+    def __init__(self, student: DinoTextModel, teacher: EMATeacher, mode: str = "shared"):
+        if mode not in ("shared", "separate"):
+            raise ValueError(f"unknown ibot_head: {mode!r} (shared|separate)")
+        self.mode = mode
+        self._student, self._teacher = student, teacher
+        self.head: DINOHead | None = None
+        self.teacher_head: EMATeacher | None = None
+        if mode == "separate":
+            p = next(student.head.parameters())
+            self.head = DINOHead(*student.head.dims).to(device=p.device, dtype=p.dtype)
+            self.teacher_head = EMATeacher(self.head, momentum=teacher.momentum)
+
+    def trainable_modules(self) -> list[nn.Module]:
+        """optimizer에 추가로 넣을 모듈. shared면 문장 head가 이미 들어가 있으므로 없다."""
+        return [self.head] if self.head is not None else []
+
+    def student_logits(self, hidden: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        head = self.head if self.head is not None else self._student.head
+        return head(hidden[token_mask.bool()])
+
+    @torch.no_grad()
+    def teacher_logits(self, hidden: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        head = self.teacher_head.model if self.teacher_head is not None else self._teacher.model.head
+        return head(hidden[token_mask.bool()])
+
+    def update(self) -> None:
+        """teacher EMA 직후에 부른다. separate head의 EMA를 문장 teacher와 같은 momentum으로 갱신."""
+        if self.teacher_head is not None:
+            self.teacher_head.momentum = self._teacher.momentum
+            self.teacher_head.update(self.head)

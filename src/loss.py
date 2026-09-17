@@ -365,3 +365,97 @@ def token_latent_loss(pred: torch.Tensor, target: torch.Tensor,
     with torch.no_grad():
         cos = F.cosine_similarity(p, y, dim=-1).mean()
     return loss, cos
+
+
+class IBOTTokenLoss(nn.Module):
+    """R18 iBOT식 토큰 수준 프로토타입 CE. 마스크 위치에서 teacher 토큰 분포를 student가 맞춘다.
+
+        c_tok <- m*c_tok + (1-m)*mean_tokens(l_t_tok)      문장 center와 별개 버퍼(iBOT 관례)
+        p_t = softmax((l_t_tok - c_tok) / tau_t), stop-grad
+        p_s = softmax(l_s_tok / tau_s)
+        L = mean_{마스크 토큰} CE(p_t, p_s) = H(p_t) + KL(p_t || p_s)
+
+    목표가 raw hidden(R15)이 아니라 학습 중인 head의 분포라 head가 움직이면 목표도 움직인다.
+    use_token_center=False면 토큰 로짓을 centering하지 않는다(centering 기여를 떼어 보는 대조용).
+    문장 DINOLoss와 같은 순서로, 이번 스텝 분포는 갱신 전 center로 계산하고 center는 그 뒤에 갱신한다.
+    """
+
+    def __init__(self, logit_dim: int, center_momentum: float, use_token_center: bool = True):
+        super().__init__()
+        self.center_momentum = center_momentum
+        self.use_token_center = use_token_center
+        self.register_buffer("token_center", torch.zeros(logit_dim))
+
+    def forward(
+        self,
+        teacher_tok_logits: list[torch.Tensor],
+        student_tok_logits: list[torch.Tensor],
+        teacher_temp: float,
+        student_temp: float,
+        update_center: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """teacher/student: 마스킹 뷰마다 [N_mask_k, K] (뷰마다 마스크 위치가 달라 teacher도 뷰별이다).
+
+        반환 loss는 뷰별 토큰 평균 CE의 뷰 평균. 마스크 토큰이 하나도 없으면 0(그래프 유지)이고
+        center도 갱신하지 않는다.
+        """
+        assert len(teacher_tok_logits) == len(student_tok_logits)
+        pairs = [(t, s) for t, s in zip(teacher_tok_logits, student_tok_logits) if t.shape[0] > 0]
+        if not pairs:
+            zero = sum((s.sum() * 0.0 for s in student_tok_logits), self.token_center.new_zeros(()))
+            nan = self.token_center.new_tensor(float("nan"))
+            return zero, {"H_pt_tok": nan, "KL_tok": nan, "H_p_bar_tok": nan, "n_tok": 0}
+
+        center = self.token_center if self.use_token_center else torch.zeros_like(self.token_center)
+        ce_list, h_list, all_p_t = [], [], []
+        for t_logits, s_logits in pairs:
+            p_t = F.softmax((t_logits.detach() - center) / teacher_temp, dim=-1)
+            log_p_s = F.log_softmax(s_logits / student_temp, dim=-1)
+            ce_list.append(-(p_t * log_p_s).sum(dim=-1).mean())
+            h_list.append(-(p_t * torch.log(p_t.clamp_min(1e-12))).sum(dim=-1).mean())
+            all_p_t.append(p_t)
+        loss = torch.stack(ce_list).mean()
+        h_pt = torch.stack(h_list).mean().detach()
+        p_bar = torch.cat(all_p_t, dim=0).mean(dim=0)
+        h_p_bar = -(p_bar * torch.log(p_bar.clamp_min(1e-12))).sum()
+
+        if update_center and self.use_token_center:
+            with torch.no_grad():
+                batch_mean = torch.cat([t for t, _ in pairs], dim=0).detach().mean(dim=0)
+                self.token_center.mul_(self.center_momentum).add_(batch_mean, alpha=1.0 - self.center_momentum)
+
+        aux = {
+            "H_pt_tok": h_pt, "KL_tok": loss.detach() - h_pt, "H_p_bar_tok": h_p_bar.detach(),
+            "n_tok": sum(t.shape[0] for t, _ in pairs),
+        }
+        return loss, aux
+
+
+class IBOTLambdaCtrl:
+    """R18 기울기 비율 균형: backbone 기울기 노름 비 ||lambda*g_ibot|| / ||g_ce||를 ratio에 맞춘다.
+
+    R15 병리(문장 CE 기울기가 스스로 줄어든 뒤 고정 lambda의 보조항이 student 기울기를 지배)에 대한 대응.
+    관측할 때마다 목표 lambda* = ratio * ||g_ce|| / ||g_ibot||(g_ibot은 lambda를 곱하기 전)를 구해
+    lambda <- m*lambda + (1-m)*lambda* 로 따라가고 [lam_min, lam_max]로 자른다. 첫 관측은 EMA 없이
+    lambda*를 바로 쓴다(초깃값 편향 방지). g_ibot이 0이면(마스크 토큰 없음) 이번 관측은 건너뛴다.
+    """
+
+    def __init__(self, ratio: float, init_lambda: float, momentum: float = 0.9,
+                 lam_min: float = 0.01, lam_max: float = 10.0):
+        if ratio <= 0:
+            raise ValueError(f"ibot_grad_ratio는 양수여야 한다: {ratio}")
+        if not 0.0 < lam_min <= lam_max:
+            raise ValueError(f"lambda 범위가 잘못됨: [{lam_min}, {lam_max}]")
+        self.ratio, self.momentum = ratio, momentum
+        self.lam_min, self.lam_max = lam_min, lam_max
+        self.lam = min(max(init_lambda, lam_min), lam_max)
+        self.initialized = False
+
+    def observe(self, g_ce_norm: float, g_ibot_norm: float) -> float:
+        if not (g_ibot_norm > 0.0) or not math.isfinite(g_ibot_norm) or not math.isfinite(g_ce_norm):
+            return self.lam
+        target = self.ratio * g_ce_norm / g_ibot_norm
+        lam = target if not self.initialized else self.momentum * self.lam + (1.0 - self.momentum) * target
+        self.lam = min(max(lam, self.lam_min), self.lam_max)
+        self.initialized = True
+        return self.lam
