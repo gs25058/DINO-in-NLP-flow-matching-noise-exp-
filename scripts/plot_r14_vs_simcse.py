@@ -9,6 +9,7 @@
 실행: uv run python scripts/plot_r14_vs_simcse.py
 """
 import csv
+import os
 import re
 import statistics
 from pathlib import Path
@@ -18,7 +19,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-MAIN = Path("/src/gs25058/noise_experiment/noise_experiment/flowdino")
+# 학습 로그를 찾을 두 번째 저장소 경로(예: worktree 스냅샷에서 돌린 run을 main에서 그릴 때). 기본은 이 저장소.
+MAIN = Path(os.environ.get("FLOWDINO_MAIN", ROOT))
 OUT = ROOT / "results" / "analysis" / "r14_r17"
 SIMCSE_CSV = MAIN / "results" / "analysis" / "simcse_compare" / "curves_eval.csv"
 EVAL = re.compile(r"\[step (\d+)\] EVAL sts_b_dev=([-\d.]+) eff_rank=([-\d.]+) max_sv_ratio=[-\d.]+ "

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import torch
+from huggingface_hub.constants import HF_HUB_CACHE
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoTokenizer, BertModel
 
@@ -34,7 +35,7 @@ from src.evaluate import (  # noqa: E402
 from src.model import DinoTextModel  # noqa: E402
 from src.train import load_config, load_sentences  # noqa: E402
 
-HF_HUB = Path("/src/gs25058/scratch/.hf_home/hub")
+HF_HUB = Path(HF_HUB_CACHE)   # HF_HOME / HF_HUB_CACHE 환경변수를 따른다
 # 우리 모델은 mean pooling으로 학습했으므로 mean 계열만 잰다. "cls"는 SimCSE 비지도판의
 # 공식 평가 방식이라 SimCSE에만 추가로 적용한다 - 우리 모델의 CLS 토큰은 학습 신호를 받은
 # 적이 없어 그 수치는 해석 가능한 정보가 아니다.

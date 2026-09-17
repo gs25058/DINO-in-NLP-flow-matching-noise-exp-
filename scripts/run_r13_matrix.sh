@@ -8,11 +8,9 @@
 # 사용: GPUS=9,5 setsid nohup bash scripts/run_r13_matrix.sh > results/logs/r13_matrix.log 2>&1 &
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
-export UV_CACHE_DIR=/src/gs25058/scratch/.uv_cache
-export HF_HOME=/src/gs25058/scratch/.hf_home
+source "$ROOT/scripts/env.sh"      # UV_CACHE_DIR, HF_HOME, PY
 export HF_HUB_OFFLINE=1
 export PYTHONPATH="$ROOT"
-PY=/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python
 
 CONFIGS=(
   r13_bert_ttdecay0.07 r13_bert_ttdecay0.05          # A 개루프

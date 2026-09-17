@@ -8,9 +8,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 if grep -q "GATE: PENDING" configs/r15_base.yaml; then
   echo "[r15] configs/r15_base.yaml의 R14 게이트가 확정되지 않았다 - 중단"; exit 2
 fi
-export UV_CACHE_DIR=/src/gs25058/scratch/.uv_cache HF_HOME=/src/gs25058/scratch/.hf_home
+source "$ROOT/scripts/env.sh"      # UV_CACHE_DIR, HF_HOME, PY
 export HF_HUB_OFFLINE=1 PYTHONPATH="$ROOT"
-PY=/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python
 FLAGS=""; [[ "${ACCEL:-0}" == "1" ]] && FLAGS="--batch-views --tf32"
 IFS=',' read -r GPU_A GPU_B <<< "${GPUS:?GPUS=a,b 필요}"
 CONFIGS=(r15_bert_tok_lam1.0 r15_bert_tok_lam0.5 r15_bert_tok_lam2.0 r15_bert_tok_lam1.0_mask0.30)

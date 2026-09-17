@@ -177,7 +177,7 @@ run_name(=config 파일명)은 `<실험단계>_[<백본>]_<메커니즘><값>[_<
 ## C-4. 새 서버에서 먼저 할 것
 1. `uv sync` 후 `scripts/prepare_data.py`로 `data/` 재생성(wiki1m 985,723문장 + 임베딩 통계). 데이터는 git에 없다.
 2. **기준선 재측정이 최우선.** GPU·드라이버·커널이 바뀌면 수치가 달라진다(TF32 하나로 -0.0075 이동한 실측 있음). 챔피언 1500-step과 r14_7700을 새 서버에서 다시 돌리고, 이후 모든 비교는 이 서버 수치가 아니라 **새 서버 기준선**과 한다. 체크포인트도 이 과정에서 재생성된다.
-3. 이 서버 전용 절대경로(`/src/gs25058/...`)가 스크립트에 남아 있다: `scripts/compare_simcse.py`(HF_HUB), `scripts/run_r13_*.sh`·`run_r14.sh`·`run_r15.sh`(PY, UV_CACHE_DIR, HF_HOME), `scripts/plot_r14_vs_simcse.py`(MAIN). 환경변수화할 것.
+3. ~~이전 서버 절대경로(`/src/gs25058/...`) 환경변수화~~ **완료(2026-09-17)**: 실행기는 `scripts/env.sh`를 source해 `UV_CACHE_DIR`/`HF_HOME`/`PY`를 받는다(이미 설정된 값은 존중, `PY` 기본은 `UV_PROJECT_ENVIRONMENT` 또는 `.venv`의 python). `compare_simcse.py`는 `huggingface_hub`의 `HF_HUB_CACHE`, `plot_r14_vs_simcse.py`는 `FLOWDINO_MAIN`(기본 저장소 루트).
 4. 부록 A-3/A-4의 GPU 규칙이 새 서버에 맞는지 사용자와 재확인.
 5. 이관 방식(2026-09-16 합의):
    - **git(`migrate/new-server`)**: `results/analysis/`의 보고서(.md)·그림(.png)·Optuna DB(.db)·trial CSV·JSON, `results/analysis_v2.md`, `results/summary.md`. `results/`는 여전히 gitignore 대상이라 `git add -f`로만 추적된다. `simcse_compare/curves_eval.csv`도 들어왔으니 `plot_r14_vs_simcse.py`의 MAIN 경로는 repo 내부로 바꾸면 된다.

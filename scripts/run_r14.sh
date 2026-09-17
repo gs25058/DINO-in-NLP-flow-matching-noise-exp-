@@ -9,9 +9,8 @@
 #   ACCEL=1 이면 --batch-views --tf32 (가속 재현 확인을 통과했을 때만)
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
-export UV_CACHE_DIR=/src/gs25058/scratch/.uv_cache HF_HOME=/src/gs25058/scratch/.hf_home
+source "$ROOT/scripts/env.sh"      # UV_CACHE_DIR, HF_HOME, PY
 export HF_HUB_OFFLINE=1 PYTHONPATH="$ROOT"
-PY=/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python
 FLAGS=""; [[ "${ACCEL:-0}" == "1" ]] && FLAGS="--batch-views --tf32"
 IFS=',' read -r GPU_A GPU_B <<< "${GPUS:?GPUS=a,b 필요}"
 CONFIGS=(r14_bert_champ_7700 r14_bert_champ_7700_mom999 r14_bert_champ_15600)
