@@ -6,9 +6,10 @@
 # 실행 플래그 --batch-views --tf32는 config가 아니라 scripts/run_r18.sh가 준다. 대조군도 같은 플래그로 돈다 -
 # 챔피언/R14 수치는 이전 서버·가속 없음이라 R18과 직접 비교하면 서버·가속 차이가 섞인다.
 #
-# GUARD: PENDING   <- 이 줄이 있으면 run_r18.sh의 matrix 단계가 시작을 거부한다.
-#   r18_bert_ctrl 2시드 plateau에서 scripts/measure_guard_refs.py로 collapse_guard 기준값을 잰 뒤
-#   아래에 collapse_guard 블록을 넣고 이 줄을 지운다(다른 계보의 기준값 재사용 금지).
+# 붕괴 감시 기준값은 이 base 자신의 계보(r18_bert_ctrl, 2시드, step 1800~3999 plateau)에서 쟀다
+# (scripts/measure_guard_refs.py, 2026-09-18). 중단선은 H_p_bar_t < 8.7093, eff_rank < 223.29,
+# batch_KL < 0.0225이고, 감시 구간(step>=800) 실측 최소는 ctrl 0.0331/0.0344, iBOT arm 0.0327로
+# 세 run 모두 여유가 1.45배 이상이다 - R13식 오발동(다른 계보 기준값 재사용) 조건이 아니다.
 extends: r12_bert_noise_optuna_t35.yaml
 run_name: r18_base
 train:
@@ -23,3 +24,10 @@ augment:
 loss:
   ibot_head: shared
   ibot_use_token_center: true
+collapse_guard:
+  enabled: true
+  h_p_bar_t_ref: 9.0093
+  eff_rank_ref: 318.99
+  batch_kl_ref: 0.0450
+  start_frac: 0.2
+  patience: 3
