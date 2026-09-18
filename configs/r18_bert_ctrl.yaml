@@ -1,0 +1,7 @@
+# R18 대조군: iBOT 없이 r18_base 그대로(= 챔피언 4000 step), 매트릭스와 같은 서버·같은 가속 플래그.
+# 역할 두 가지: (1) P-18a/b/c를 서버·가속 차이 없이 판정하는 동일 조건 기준선, (2) 붕괴 감시 기준값의 plateau.
+# 기준값 자신이 되는 run이라 붕괴 감시는 항상 끈다.
+extends: r18_base.yaml
+run_name: r18_bert_ctrl
+collapse_guard:
+  enabled: false

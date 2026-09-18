@@ -1,0 +1,5 @@
+# R18a: iBOT 토큰 CE, 고정 lambda 1.0, shared head, mask 0.15.
+extends: r18_base.yaml
+run_name: r18a_lam1.0
+loss:
+  ibot_lambda: 1.0

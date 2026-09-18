@@ -1,0 +1,25 @@
+# R18 공통 base: 챔피언(r12_bert_noise_optuna_t35, 1500 step 0.7333)을 4000 step으로 - R14 4000-step 궤적과 같은 길이.
+#
+# 스케줄 frac 키(LR warmup, teacher_temp warmup, momentum ramp, augment warmup)는 비율 유지.
+# data_order epoch: R14와 같다(4000x32 = 128k문장, 한 바퀴 안이라 중복 0).
+# 마스킹 뷰 설정은 여기 두지만 iBOT이 꺼진 run(r18_bert_ctrl)에서는 train.py가 마스킹 자체를 끈다.
+# 실행 플래그 --batch-views --tf32는 config가 아니라 scripts/run_r18.sh가 준다. 대조군도 같은 플래그로 돈다 -
+# 챔피언/R14 수치는 이전 서버·가속 없음이라 R18과 직접 비교하면 서버·가속 차이가 섞인다.
+#
+# GUARD: PENDING   <- 이 줄이 있으면 run_r18.sh의 matrix 단계가 시작을 거부한다.
+#   r18_bert_ctrl 2시드 plateau에서 scripts/measure_guard_refs.py로 collapse_guard 기준값을 잰 뒤
+#   아래에 collapse_guard 블록을 넣고 이 줄을 지운다(다른 계보의 기준값 재사용 금지).
+extends: r12_bert_noise_optuna_t35.yaml
+run_name: r18_base
+train:
+  max_steps: 4000
+  data_order: epoch
+eval:
+  every_steps: 250
+augment:
+  token_latent_views: 1
+  mask_ratio: 0.15
+  mask_then_noise: true
+loss:
+  ibot_head: shared
+  ibot_use_token_center: true

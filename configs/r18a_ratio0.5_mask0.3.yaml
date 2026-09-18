@@ -1,0 +1,7 @@
+# R18a: iBOT 토큰 CE, lambda 자동(grad ratio 0.5), shared head, mask 0.30.
+extends: r18_base.yaml
+run_name: r18a_ratio0.5_mask0.3
+loss:
+  ibot_grad_ratio: 0.5
+augment:
+  mask_ratio: 0.30

@@ -1,0 +1,6 @@
+# R18b: iBOT 토큰 CE, lambda 자동(grad ratio 0.5), separate head(DINOv2 방식, 별도 EMA 사본), mask 0.15.
+extends: r18_base.yaml
+run_name: r18b_sep_ratio0.5
+loss:
+  ibot_grad_ratio: 0.5
+  ibot_head: separate
