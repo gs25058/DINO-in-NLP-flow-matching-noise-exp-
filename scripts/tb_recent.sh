@@ -21,4 +21,10 @@ if [[ ! -d "$LOGDIR" ]]; then
 fi
 
 source "$ROOT/scripts/env.sh" 2>/dev/null || true
+# env.sh가 정한 PY와 같은 venv의 tensorboard를 쓴다. `uv run`은 cwd 프로젝트 환경을 찾아 동기화하므로
+# venv가 저장소 밖(UV_PROJECT_ENVIRONMENT)에 있으면 여기에 5.6GB짜리 .venv를 새로 만든다.
+TB="$(dirname "${PY:-}")/tensorboard"
+if [[ -x "$TB" ]]; then
+  exec "$TB" --logdir "$LOGDIR" --port "$PORT" --host 0.0.0.0
+fi
 exec uv run tensorboard --logdir "$LOGDIR" --port "$PORT" --host 0.0.0.0
