@@ -176,6 +176,24 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "train.head_lr": ("float", {"low": 1.9e-4, "high": 1.75e-3, "log": True}),
         "loss.teacher_temp": ("float", {"low": 0.09, "high": 0.18}),
     },
+    # R18 iBOT 토큰 CE. 매트릭스(5 arm x 2시드, 4000 step)는 손으로 고른 값이었고 전 arm이 iBOT-off
+    # 대조군(seed42 0.7440 / 2시드 0.7465)보다 낮았다 - 손으로 고른 값 때문에 기각한 것이 아님을 확인한다.
+    # base는 r18_base(= 챔피언 4000 step, 붕괴 감시 기준값은 대조군 plateau 실측).
+    #
+    # 매트릭스에서 나온 단조 관계(lambda 0.3->1.0, mask 0.15->0.30 둘 다 악화)를 믿고 아래를 넓게 연다:
+    #   ibot_lambda  하한을 0.005까지 내린다. 마스킹 뷰는 iBOT이 켜져야 생기므로, lambda가 거의 0인
+    #                구간은 "마스킹 뷰는 있고 토큰 CE는 없는" 절편이 된다 - 손실의 원인이 토큰 CE인지
+    #                마스킹된 student 뷰 자체인지를 이 study가 가른다(매트릭스로는 구분 못 했다).
+    #   mask_ratio   0.05까지. 매트릭스 최저값 0.15보다 약한 압력을 본 적이 없다.
+    #   ibot_head / ibot_use_token_center / token_latent_views  각각 매트릭스에서 한 값씩만 봤다.
+    # 반드시 --max-steps 4000(배포 길이)로 돌린다 - frac 스케줄이 예산을 따라가므로 짧은 예산 결과는 전이되지 않는다.
+    "r18_ibot": {
+        "loss.ibot_lambda": ("float", {"low": 0.005, "high": 1.5, "log": True}),
+        "augment.mask_ratio": ("float", {"low": 0.05, "high": 0.35}),
+        "augment.token_latent_views": ("int", {"low": 1, "high": 2}),
+        "loss.ibot_head": ("categorical", {"choices": ["shared", "separate"]}),
+        "loss.ibot_use_token_center": ("categorical", {"choices": [True, False]}),
+    },
     "flow_noise_t": {
         "augment.t_lo": ("float", {"low": 0.0, "high": 0.6}),
         "_t_span": ("float", {"low": 0.05, "high": 0.6}),      # t_max = t_lo + span (1.0 상한 clip)
