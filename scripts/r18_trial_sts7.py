@@ -1,13 +1,23 @@
-"""study의 trial별 7-task 평균을 재서 목적함수(STS-B dev)와 나란히 기록한다.
+"""study의 trial별 7-task 평균을 재서 기록하고, 남겨둘 이유가 없는 체크포인트를 지운다.
 
 튜닝 목표는 STS-B dev 하나지만, 그 순위가 7-task 순위와 어긋나는 trial이 있으면 그 자체가 기록할
 가치가 있는 결과다(이 프로젝트의 보고 지표는 7-task 평균이다). trial 체크포인트가 있어야 하므로
 study를 `SAVE_CKPT=1`(run_study.sh) 또는 `--save-checkpoints`(tune.py)로 돌렸어야 한다.
 
+trial당 약 860MB라 50 trial이면 43GB다. 대여 서버라 용량이 한정적이므로 --prune으로 정리한다:
+**평가해서 점수를 JSON에 남긴 뒤** 아래 중 어디에도 해당하지 않는 체크포인트만 지운다
+(점수 기록은 남으므로 지워도 결과는 보존된다).
+  - 7-task 평균 >= --min-7task (기본 0.65)
+  - STS-B dev 상위 --keep-top (기본 5)
+  - 7-task 상위 --keep-top
+  - STS-B dev가 study 최고값에서 --keep-margin (기본 0.005) 이내
+아직 평가하지 않은 trial, 완료되지 않은 trial(진행 중), study 소속이 아닌 체크포인트는 절대 건드리지 않는다.
+
 결과는 증분 캐시에 쌓이므로 study가 도는 중에 여러 번 돌려도 이미 잰 trial은 건너뛴다.
 
 실행:
-    uv run python scripts/r18_trial_sts7.py --study tune_r18_bert_tunebase_r18_ibot_wide
+    uv run python scripts/r18_trial_sts7.py --study tune_r18_bert_tunebase_r18_ibot_wide --prune
+    uv run python scripts/r18_trial_sts7.py --study ... --prune --dry-run   # 지울 목록만 보기
 산출물: results/analysis/r18/<study>_sts7.json (캐시) / _sts7.md (STS-B 순위와 나란히 놓은 표)
 """
 import argparse
@@ -34,6 +44,16 @@ def main():
     ap.add_argument("--pooling", default="last", choices=["last", "first_last", "cls"])
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--db", default=None,
+                    help="study SQLite 경로 (기본 <repo>/results/analysis/<study>.db). "
+                         "실행 스냅샷 worktree에서 돌린 study는 그쪽 results/analysis에 쌓인다")
+    ap.add_argument("--prune", action="store_true",
+                    help="평가·기록이 끝난 trial 중 남길 이유가 없는 체크포인트를 지운다")
+    ap.add_argument("--dry-run", action="store_true", help="--prune과 함께: 지울 목록만 출력하고 실제로 지우지 않는다")
+    ap.add_argument("--min-7task", type=float, default=0.65, help="이 값 이상이면 보존 (기본 0.65)")
+    ap.add_argument("--keep-top", type=int, default=5, help="STS-B / 7-task 각각 상위 N개는 보존 (기본 5)")
+    ap.add_argument("--keep-margin", type=float, default=0.005,
+                    help="STS-B가 study 최고값에서 이 차이 이내면 보존 (기본 0.005)")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir) if args.out_dir else ROOT / "results" / "analysis" / "r18"
@@ -41,8 +61,10 @@ def main():
     cache_path = out_dir / f"{args.study}_sts7.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
 
-    study = optuna.load_study(study_name=args.study,
-                              storage=f"sqlite:///{ROOT}/results/analysis/{args.study}.db")
+    db = Path(args.db) if args.db else ROOT / "results" / "analysis" / f"{args.study}.db"
+    if not db.exists():
+        raise SystemExit(f"study DB가 없다: {db} (--db로 경로를 지정한다)")
+    study = optuna.load_study(study_name=args.study, storage=f"sqlite:///{db}")
     done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
     done.sort(key=lambda t: -t.value)
     if args.top:
@@ -102,6 +124,57 @@ def main():
     print(f"[trial_sts7] 7-task 최고: t{best_7[0]} {best_7[1]['avg_7task'] * 100:.2f} "
           f"(STS-B {best_7[1]['sts_b_dev']:.4f})")
     print(f"[trial_sts7] 저장: {md}")
+
+    if args.prune:
+        prune(args, cache, rows, by_sts, by_7, best_sts[1]["sts_b_dev"])
+
+
+def keep_reasons(v: dict, n: int, by_sts: dict, by_7: dict, best_sts: float, args) -> list[str]:
+    """이 trial의 체크포인트를 남길 이유들. 비어 있으면 지워도 되는 trial이다."""
+    reasons = []
+    if v["avg_7task"] >= args.min_7task:
+        reasons.append(f"7-task {v['avg_7task'] * 100:.2f} >= {args.min_7task * 100:.1f}")
+    if by_sts[n] <= args.keep_top:
+        reasons.append(f"STS-B 상위 {by_sts[n]}위")
+    if by_7[n] <= args.keep_top:
+        reasons.append(f"7-task 상위 {by_7[n]}위")
+    if v["sts_b_dev"] >= best_sts - args.keep_margin:
+        reasons.append(f"STS-B 최고값 -{args.keep_margin} 이내")
+    return reasons
+
+
+def prune(args, cache: dict, rows: list, by_sts: dict, by_7: dict, best_sts: float) -> None:
+    """평가가 끝난 trial의 체크포인트만 대상으로, 남길 이유가 없는 것을 지운다.
+
+    캐시(JSON)에 점수가 남아 있는 trial만 후보다 - 아직 평가하지 않았거나 진행 중인 trial은
+    애초에 rows에 없으므로 건드리지 않는다. 경로도 이 study의 trial 이름으로만 만든다.
+    """
+    freed = 0
+    kept, removed = [], []
+    for n, v in sorted(rows, key=lambda r: -r[1]["sts_b_dev"]):
+        ckpt_dir = ROOT / "checkpoints" / f"{args.study}_t{n}"
+        if not ckpt_dir.exists():
+            continue
+        size = sum(f.stat().st_size for f in ckpt_dir.rglob("*") if f.is_file())
+        reasons = keep_reasons(v, n, by_sts, by_7, best_sts, args)
+        if reasons:
+            kept.append((n, size, ", ".join(reasons)))
+            continue
+        removed.append((n, size, f"STS-B {v['sts_b_dev']:.4f} ({by_sts[n]}위) / 7-task {v['avg_7task'] * 100:.2f} ({by_7[n]}위)"))
+        freed += size
+        if not args.dry_run:
+            for f in sorted(ckpt_dir.rglob("*"), key=lambda p: -len(p.parts)):
+                f.unlink() if f.is_file() else f.rmdir()
+            ckpt_dir.rmdir()
+
+    head = "[prune] 지울 대상(dry-run)" if args.dry_run else "[prune] 삭제함"
+    for n, size, why in removed:
+        print(f"  {head}: t{n} ({size / 2**30:.2f} GiB) - {why}")
+    for n, size, why in kept:
+        print(f"  [prune] 보존: t{n} ({size / 2**30:.2f} GiB) - {why}")
+    verb = "확보 예정" if args.dry_run else "확보"
+    print(f"[prune] {len(removed)}개 {'삭제 대상' if args.dry_run else '삭제'}, {freed / 2**30:.2f} GiB {verb} "
+          f"/ 보존 {len(kept)}개")
 
 
 if __name__ == "__main__":
