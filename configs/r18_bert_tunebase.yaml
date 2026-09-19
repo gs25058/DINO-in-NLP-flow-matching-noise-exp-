@@ -1,0 +1,11 @@
+# R18 통합 탐색(space "r18_ibot_wide", 4000 step) 전용 base.
+#
+# r18_base와 같되 붕괴 감시의 batch_KL 조건만 끈다(ref 0 -> 중단선 0): 이 study는 cov_iso_lambda와
+# teacher_temp를 크게 흔드는데 batch_KL은 그 두 축에 가장 민감하다. R14 재튜닝에서 같은 이유로 껐고,
+# 켜 두면 11분짜리 trial이 오발동으로 잘려 틀린 낮은 점수가 TPE에 들어간다(R13에서 23 trial이 이렇게 날아갔다).
+# 진짜 균등 붕괴는 H(p_bar_t)가, rank 붕괴는 eff_rank가 잡는다 - 두 조건은 그대로 둔다.
+# 기준값 자체는 r18_base와 동일하게 대조군(r18_bert_ctrl) 2시드 plateau 실측이다.
+extends: r18_base.yaml
+run_name: r18_bert_tunebase
+collapse_guard:
+  batch_kl_ref: 0.0

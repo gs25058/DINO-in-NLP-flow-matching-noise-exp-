@@ -194,6 +194,29 @@ SEARCH_SPACES: dict[str, dict[str, tuple[str, dict]]] = {
         "loss.ibot_head": ("categorical", {"choices": ["shared", "separate"]}),
         "loss.ibot_use_token_center": ("categorical", {"choices": [True, False]}),
     },
+    # R18 통합 탐색: 위 iBOT 5축 + 코어 5축. iBOT 항이 기울기 균형을 바꾸고 예산도 1500에서 4000으로
+    # 바뀌었으므로, 1500-step 챔피언에서 물려받은 코어 값이 이 조합에서 최적이라는 보장이 없다
+    # (r14_long_budget이 7700 step에서 같은 근거로 연 축들이다).
+    #   cov_iso_lambda  R14 진단은 "이방성 압력 과잉"이었고 R18 매트릭스에서도 rank는 오르는데 alignment가
+    #                   나빠지는 같은 모양이 나왔다. 아래쪽을 넓게 연다(현 5.87).
+    #   teacher_temp    plateau 값이 전 구간에 걸리고, 토큰 CE도 같은 온도를 쓴다(현 0.1348).
+    #   momentum_end    예산이 2.7배라 teacher 속도의 최적점이 달라진다(현 0.9985).
+    #   lr / head_lr    총 갱신량이 2.7배. 챔피언 값 기준 +-3배(현 6.88e-5 / 5.82e-4).
+    # t 범위(t_lo/t_max)는 열지 않는다 - flow_noise_t study(40 trial)로 이미 튜닝된 축이고, 차원을 늘리면
+    # 같은 trial 예산에서 나머지 축의 해상도가 떨어진다. 필요하면 별도 study로 본다(사용자 결정, 2026-09-19).
+    # lambda 하한 0.005는 "마스킹 뷰는 있고 토큰 CE는 없는" 절편이라, 이 study는 대조군 계열의 코어 튜닝도 겸한다.
+    "r18_ibot_wide": {
+        "loss.ibot_lambda": ("float", {"low": 0.005, "high": 1.5, "log": True}),
+        "augment.mask_ratio": ("float", {"low": 0.05, "high": 0.35}),
+        "augment.token_latent_views": ("int", {"low": 1, "high": 2}),
+        "loss.ibot_head": ("categorical", {"choices": ["shared", "separate"]}),
+        "loss.ibot_use_token_center": ("categorical", {"choices": [True, False]}),
+        "loss.cov_iso_lambda": ("float", {"low": 0.3, "high": 8.0, "log": True}),
+        "loss.teacher_temp": ("float", {"low": 0.09, "high": 0.18}),
+        "train.momentum_end": ("float", {"low": 0.998, "high": 0.9995}),
+        "train.lr": ("float", {"low": 2.3e-5, "high": 2.1e-4, "log": True}),
+        "train.head_lr": ("float", {"low": 1.9e-4, "high": 1.75e-3, "log": True}),
+    },
     "flow_noise_t": {
         "augment.t_lo": ("float", {"low": 0.0, "high": 0.6}),
         "_t_span": ("float", {"low": 0.05, "high": 0.6}),      # t_max = t_lo + span (1.0 상한 clip)
