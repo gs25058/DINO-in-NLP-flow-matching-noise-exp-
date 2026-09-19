@@ -324,7 +324,8 @@ class GpuPool:
 
 
 def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: int,
-              seed: int, gpu_pool: GpuPool, timeout: int, study_name: str) -> float:
+              seed: int, gpu_pool: GpuPool, timeout: int, study_name: str,
+              save_checkpoints: bool = False) -> float:
     cfg = copy.deepcopy(base_cfg)
     pseudo: dict = {}
     for dotted, (kind, kwargs) in SEARCH_SPACES[space_name].items():
@@ -347,7 +348,10 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
     # 쓰면 어떤 search space를 탐색 중인지(예: koleo_lambda)가 trial 이름에서 사라진다.
     cfg["run_name"] = f"{study_name}_t{trial.number}"
     cfg["train"]["max_steps"] = max_steps
-    cfg["train"]["save_checkpoint"] = False  # trial 결과는 train.log의 sts_b_dev만으로 충분 - .pt는 아무도 안 읽음
+    # 기본은 저장 안 함(trial 결과는 train.log의 sts_b_dev만으로 충분). --save-checkpoints를 주면 남긴다:
+    # 목적함수는 STS-B dev 하나지만, 끝난 뒤 trial별 7-task를 재려면 체크포인트가 있어야 한다
+    # (scripts/r18_trial_sts7.py). trial당 약 850MB.
+    cfg["train"]["save_checkpoint"] = save_checkpoints
     cfg["seed"] = seed
     # train.py가 학습 종료 시 TensorBoard HPARAMS 탭에 이 trial을 기록하도록 전달한다.
     cfg["_optuna"] = {"study_name": study_name, "trial_number": trial.number, "params": dict(trial.params)}
@@ -407,6 +411,8 @@ def main():
     parser.add_argument("--gpus", default="0", help="쉼표로 구분된 GPU id 목록, 앞에서 n_jobs개 사용")
     parser.add_argument("--study-name", default=None)
     parser.add_argument("--timeout", type=int, default=3600, help="trial 하나당 최대 대기(초)")
+    parser.add_argument("--save-checkpoints", action="store_true",
+                        help="trial마다 checkpoints/<run_name>/last.pt를 남긴다 (사후 7-task 평가용, trial당 ~850MB)")
     args = parser.parse_args()
 
     base_cfg = load_config(Path(args.base_config))
@@ -423,7 +429,8 @@ def main():
 
     study.optimize(
         lambda trial: run_trial(
-            trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout, study_name
+            trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout, study_name,
+            args.save_checkpoints,
         ),
         n_trials=args.n_trials, n_jobs=args.n_jobs,
     )

@@ -29,6 +29,8 @@ N_JOBS="${N_JOBS:-2}"
 # 파이썬 실행기. 기본은 uv run python이지만, venv가 없는 worktree에서 돌릴 때는 공용 venv의 python을 주어
 # uv가 worktree마다 venv를 새로 만들지 않게 한다. (tune.py가 trial을 같은 인터프리터로 띄운다.)
 PY="${PY:-uv run python}"
+# SAVE_CKPT=1이면 trial마다 체크포인트를 남긴다(사후 7-task 평가용, trial당 ~850MB).
+SAVE_CKPT_FLAG=""; [[ "${SAVE_CKPT:-0}" == "1" ]] && SAVE_CKPT_FLAG="--save-checkpoints"
 TIMEOUT="${TIMEOUT:-3600}"   # trial 하나당 최대 초. 7700-step trial은 75~85분이라 기본값으로는 전부 잘린다.
 # GPU 선택 임계값. 기본값은 "진짜 유휴한 GPU만" 이지만, 서버가 계속 붐벼서 한 trial도 못 도는
 # 상황에서는 MAX_UTIL을 올려 남의 작업과 SM을 나눠 쓰도록 완화할 수 있다(사용자 판단 사항).
@@ -158,7 +160,7 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
     --gpus "$GPUS" \
     --study-name "$STUDY_NAME" \
     --timeout "$TIMEOUT" \
-    --seed 42
+    --seed 42 $SAVE_CKPT_FLAG
   rc=$?
   log "tune.py 종료 (exit=$rc)"
 
