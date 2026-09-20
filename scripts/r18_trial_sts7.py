@@ -12,12 +12,15 @@ trial당 약 860MB라 50 trial이면 43GB다. 대여 서버라 용량이 한정�
   - 7-task 상위 --keep-top
   - STS-B dev가 study 최고값에서 --keep-margin (기본 0.005) 이내
 아직 평가하지 않은 trial, 완료되지 않은 trial(진행 중), study 소속이 아닌 체크포인트는 절대 건드리지 않는다.
+--prune-tb를 함께 주면 같은 기준으로 results/tensorboard/<study>_t<n>도 지운다(trial당 약 3.3MB).
+용량보다 TensorBoard run 목록을 줄이는 효과가 크다. 지워도 점수·파라미터는 study DB와 JSON에 남는다.
 
 결과는 증분 캐시에 쌓이므로 study가 도는 중에 여러 번 돌려도 이미 잰 trial은 건너뛴다.
 
 실행:
     uv run python scripts/r18_trial_sts7.py --study tune_r18_bert_tunebase_r18_ibot_wide --prune
     uv run python scripts/r18_trial_sts7.py --study ... --prune --dry-run   # 지울 목록만 보기
+    uv run python scripts/r18_trial_sts7.py --study ... --prune --prune-tb   # TensorBoard run도 함께
 산출물: results/analysis/r18/<study>_sts7.json (캐시) / _sts7.md (STS-B 순위와 나란히 놓은 표)
 """
 import argparse
@@ -50,6 +53,8 @@ def main():
     ap.add_argument("--prune", action="store_true",
                     help="평가·기록이 끝난 trial 중 남길 이유가 없는 체크포인트를 지운다")
     ap.add_argument("--dry-run", action="store_true", help="--prune과 함께: 지울 목록만 출력하고 실제로 지우지 않는다")
+    ap.add_argument("--prune-tb", action="store_true",
+                    help="같은 기준으로 results/tensorboard/<study>_t<n>도 지운다 (run 목록 정리용, 약 3.3MB/trial)")
     ap.add_argument("--min-7task", type=float, default=0.65, help="이 값 이상이면 보존 (기본 0.65)")
     ap.add_argument("--keep-top", type=int, default=5, help="STS-B / 7-task 각각 상위 N개는 보존 (기본 5)")
     ap.add_argument("--keep-margin", type=float, default=0.005,
@@ -151,11 +156,14 @@ def prune(args, cache: dict, rows: list, by_sts: dict, by_7: dict, best_sts: flo
     """
     freed = 0
     kept, removed = [], []
+    targets = ["checkpoints"] + (["tensorboard"] if getattr(args, "prune_tb", False) else [])
     for n, v in sorted(rows, key=lambda r: -r[1]["sts_b_dev"]):
-        ckpt_dir = ROOT / "checkpoints" / f"{args.study}_t{n}"
-        if not ckpt_dir.exists():
+        dirs = [ROOT / ("results/tensorboard" if t == "tensorboard" else t) / f"{args.study}_t{n}"
+                for t in targets]
+        dirs = [d for d in dirs if d.exists()]
+        if not dirs:
             continue
-        size = sum(f.stat().st_size for f in ckpt_dir.rglob("*") if f.is_file())
+        size = sum(f.stat().st_size for d in dirs for f in d.rglob("*") if f.is_file())
         reasons = keep_reasons(v, n, by_sts, by_7, best_sts, args)
         if reasons:
             kept.append((n, size, ", ".join(reasons)))
@@ -163,9 +171,10 @@ def prune(args, cache: dict, rows: list, by_sts: dict, by_7: dict, best_sts: flo
         removed.append((n, size, f"STS-B {v['sts_b_dev']:.4f} ({by_sts[n]}위) / 7-task {v['avg_7task'] * 100:.2f} ({by_7[n]}위)"))
         freed += size
         if not args.dry_run:
-            for f in sorted(ckpt_dir.rglob("*"), key=lambda p: -len(p.parts)):
-                f.unlink() if f.is_file() else f.rmdir()
-            ckpt_dir.rmdir()
+            for d in dirs:
+                for f in sorted(d.rglob("*"), key=lambda p: -len(p.parts)):
+                    f.unlink() if f.is_file() else f.rmdir()
+                d.rmdir()
 
     head = "[prune] 지울 대상(dry-run)" if args.dry_run else "[prune] 삭제함"
     for n, size, why in removed:

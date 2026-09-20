@@ -76,3 +76,28 @@ def test_dry_run_deletes_nothing(tmp_path, monkeypatch, capsys):
     trial_sts7.prune(args, {}, [(3, {"sts_b_dev": 0.60, "avg_7task": 0.60})], {3: 30}, {3: 30}, BEST_STS, )
     assert (tmp_path / "checkpoints" / "mystudy_t3" / "last.pt").exists()
     assert "dry-run" in capsys.readouterr().out
+
+
+def test_prune_tb_removes_tensorboard_dirs_only_when_asked(tmp_path, monkeypatch):
+    monkeypatch.setattr(trial_sts7, "ROOT", tmp_path)
+    for base in ("checkpoints", "results/tensorboard"):
+        for n in ("mystudy_t3", "mystudy_t1"):
+            d = tmp_path / base / n
+            d.mkdir(parents=True)
+            (d / "f").write_bytes(b"x")
+    rows = [(1, {"sts_b_dev": 0.75, "avg_7task": 0.70}),     # 보존
+            (3, {"sts_b_dev": 0.60, "avg_7task": 0.60})]     # 삭제 대상
+    by_sts, by_7 = {1: 1, 3: 30}, {1: 1, 3: 30}
+    base_args = dict(study="mystudy", prune=True, dry_run=False,
+                     min_7task=0.68, keep_top=5, keep_margin=0.005)
+
+    # --prune-tb 없이: 체크포인트만 사라지고 TensorBoard run은 남는다
+    trial_sts7.prune(argparse.Namespace(**base_args, prune_tb=False), {}, rows, by_sts, by_7, 0.75)
+    assert not (tmp_path / "checkpoints" / "mystudy_t3").exists()
+    assert (tmp_path / "results/tensorboard" / "mystudy_t3").exists()
+
+    # --prune-tb: 남아 있던 TensorBoard run도 사라진다
+    trial_sts7.prune(argparse.Namespace(**base_args, prune_tb=True), {}, rows, by_sts, by_7, 0.75)
+    assert not (tmp_path / "results/tensorboard" / "mystudy_t3").exists()
+    assert (tmp_path / "results/tensorboard" / "mystudy_t1").exists()   # 보존 대상은 그대로
+    assert (tmp_path / "checkpoints" / "mystudy_t1").exists()
