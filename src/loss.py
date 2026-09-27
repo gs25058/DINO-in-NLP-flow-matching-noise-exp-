@@ -459,3 +459,37 @@ class IBOTLambdaCtrl:
         self.lam = min(max(lam, self.lam_min), self.lam_max)
         self.initialized = True
         return self.lam
+
+
+def sinkhorn_log(scores: torch.Tensor, n_iters: int) -> torch.Tensor:
+    """exp(scores)에 Sinkhorn-Knopp를 적용한 이중확률행렬의 log. 로그 영역이라 overflow가 없다.
+
+    마지막이 열 정규화라 열 합은 정확히 1, 행 합은 반복이 늘수록 1에 수렴한다(SwAV도 3회).
+    """
+    log_p = scores
+    for _ in range(n_iters):
+        log_p = log_p - torch.logsumexp(log_p, dim=1, keepdim=True)
+        log_p = log_p - torch.logsumexp(log_p, dim=0, keepdim=True)
+    return log_p
+
+
+def gram_sinkhorn_topk(gram: torch.Tensor, n_iters: int = 3, top_k: int = 5) -> tuple[torch.Tensor, dict[str, float]]:
+    """gram -> exp -> Sinkhorn-Knopp -> SVD 상위 top_k 특이성분 제거. 결과 행렬을 돌려준다.
+
+    상위 성분 제거는 좌특이벡터 U_k(no_grad)로의 투영을 빼는 방식이다:
+    U_k(U_k^T P) = sum_{i<k} sigma_i u_i v_i^T 로 값은 동일하면서 SVD backward의
+    특이값 축퇴 불안정을 피한다.
+    """
+    p = sinkhorn_log(gram, n_iters).exp()
+    with torch.no_grad():
+        u_full, s_full, _ = torch.linalg.svd(p.detach().double(), full_matrices=False)
+        u_k = u_full[:, :top_k].to(p.dtype)
+    out = p - u_k @ (u_k.t() @ p)
+    with torch.no_grad():
+        aux = {
+            "gram_sigma1": float(s_full[0]),
+            "gram_topk_energy": float((s_full[:top_k] ** 2).sum() / (s_full**2).sum().clamp_min(1e-12)),
+            "gram_out_diag": float(out.diag().mean()),
+            "gram_out_offdiag": float((out.sum() - out.diag().sum()) / (out.numel() - out.shape[0])),
+        }
+    return out, aux

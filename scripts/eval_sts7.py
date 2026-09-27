@@ -46,9 +46,15 @@ def main():
         if not ck.exists():
             print(f"[eval_sts7] 체크포인트 없음: {ck}")
             continue
-        model = DinoTextModel(cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"],
-                              cfg["model"]["head"]["logit_dim"]).to(args.device).eval()
         sd = torch.load(ck, map_location=args.device, weights_only=True)
+        if sd.get("model_cfg", {}).get("simcse"):
+            # SimCSE 기준선 체크포인트(scripts/train_simcse_baseline.py)는 모델 클래스가 다르다.
+            sys.path.insert(0, str(ROOT / "scripts"))
+            from train_simcse_baseline import SimCSEModel  # noqa: PLC0415
+            model = SimCSEModel(sd["model_cfg"]["backbone"], sd["model_cfg"]["dropout"]).to(args.device).eval()
+        else:
+            model = DinoTextModel(cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"],
+                                  cfg["model"]["head"]["logit_dim"]).to(args.device).eval()
         # 체크포인트에 predictor 등 모델 밖 파라미터가 섞일 수 있어 strict=False로 싣되, 모델 쪽 누락은 막는다
         missing, _unexpected = model.load_state_dict(sd[key], strict=False)
         if missing:

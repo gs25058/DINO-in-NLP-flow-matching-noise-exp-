@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.evaluate import effective_rank_metrics, sts_b_dev_metrics  # noqa: E402
+from src.loss import gram_sinkhorn_topk  # noqa: E402
 from src.train import load_config, load_sentences, setup_logger  # noqa: E402
 
 
@@ -56,9 +57,14 @@ class SimCSEModel(nn.Module):
         cfg = AutoConfig.from_pretrained(backbone_name)
         cfg.hidden_dropout_prob = dropout
         cfg.attention_probs_dropout_prob = dropout
-        self.backbone = BertModel.from_pretrained(backbone_name, config=cfg)
+        # 원본 BertForCL은 BertModel(config, add_pooling_layer=False) - BERT 자체 pooler를 쓰지 않는다.
+        self.backbone = BertModel.from_pretrained(backbone_name, config=cfg, add_pooling_layer=False)
         h = self.backbone.config.hidden_size
         self.mlp = nn.Sequential(nn.Linear(h, h), nn.Tanh())  # 학습 전용 pooler
+        # 원본은 cl_init -> init_weights로 MLPLayer를 N(0, initializer_range)로 초기화한다
+        # (PreTrainedModel._init_weights). PyTorch 기본 kaiming uniform과 분포가 다르다.
+        nn.init.normal_(self.mlp[0].weight, mean=0.0, std=cfg.initializer_range)
+        nn.init.zeros_(self.mlp[0].bias)
 
     def get_input_embeddings(self):
         return self.backbone.get_input_embeddings()
@@ -88,16 +94,32 @@ class SimCSEModel(nn.Module):
         return self.mlp(h[:, 0])
 
 
-def info_nce(z1: torch.Tensor, z2: torch.Tensor, temperature: float):
-    """SimCSE 식 (2): 같은 문장의 두 dropout 뷰가 positive, 배치 내 나머지가 negative."""
-    sim = F.cosine_similarity(z1.unsqueeze(1), z2.unsqueeze(0), dim=-1) / temperature
+def info_nce(z1: torch.Tensor, z2: torch.Tensor, temperature: float,
+             gram_topk: int = 0, sinkhorn_iters: int = 3, gram_scale: float = 1.0):
+    """SimCSE 식 (2): 같은 문장의 두 dropout 뷰가 positive, 배치 내 나머지가 negative.
+
+    gram_topk > 0이면 cos 유사도 행렬(gram)을 그대로 쓰지 않고
+    exp -> Sinkhorn-Knopp -> SVD 상위 gram_topk 특이성분 제거를 거친 행렬을
+    "cos 유사도인 것처럼" 써서 같은 InfoNCE를 계산한다.
+
+    gram_scale: 변환 행렬에 곱하는 상수(온도와 같은 축). 기본 1.0 = 변환 결과를 그대로 cos 자리에 쓴다.
+    300-step 스윕에서 1~8은 loss가 살아 있고(3.78 / 1.36) STS가 대조군보다 높았으나, B(=64)
+    이상으로 키우면 Sinkhorn이 이미 푼 매칭을 그대로 읽는 꼴이라 loss가 0으로 포화하고
+    STS가 무너졌다(scale 64: 0.574, 512: 0.447 vs 대조군 0.608).
+    """
+    sim = F.cosine_similarity(z1.unsqueeze(1), z2.unsqueeze(0), dim=-1)
+    gram_aux = {}
+    if gram_topk > 0:
+        sim, gram_aux = gram_sinkhorn_topk(sim, sinkhorn_iters, gram_topk)
+        sim = sim * gram_scale
+    sim = sim / temperature
     labels = torch.arange(sim.size(0), device=sim.device)
     loss = F.cross_entropy(sim, labels)
     with torch.no_grad():
         acc = (sim.argmax(dim=1) == labels).float().mean()
         pos = sim.diag().mean() * temperature
         neg = ((sim.sum(1) - sim.diag()) / (sim.size(0) - 1)).mean() * temperature
-    return loss, {"infonce_acc": acc.item(), "pos_cos": pos.item(), "neg_cos": neg.item()}
+    return loss, {"infonce_acc": acc.item(), "pos_cos": pos.item(), "neg_cos": neg.item(), **gram_aux}
 
 
 def main():
@@ -120,6 +142,13 @@ def main():
     ap.add_argument("--sampling", default="epoch", choices=["epoch", "with-replacement"])
     ap.add_argument("--eval-steps", type=int, default=125)
     ap.add_argument("--eval-pooling", default="cls", help="cls(SimCSE 공식) | last | first_last")
+    # 원본(HF Trainer) 기본값: weight_decay 0.0, max_grad_norm 1.0
+    ap.add_argument("--weight-decay", type=float, default=0.0)
+    ap.add_argument("--max-grad-norm", type=float, default=1.0)
+    # gram 변환 (exp -> Sinkhorn-Knopp -> SVD top-k 제거 -> cos처럼 InfoNCE). 0이면 원본 SimCSE.
+    ap.add_argument("--gram-topk", type=int, default=0)
+    ap.add_argument("--sinkhorn-iters", type=int, default=3)
+    ap.add_argument("--gram-scale", type=float, default=1.0, help="변환 행렬에 곱할 상수(온도 축)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -139,6 +168,8 @@ def main():
     logger.info(f"[simcse] backbone={backbone} batch={args.batch_size} lr={args.lr} "
                 f"temp={args.temperature} dropout={args.dropout} max_seq_len={max_tokens} "
                 f"sched={args.scheduler} fp16={use_amp} sampling={args.sampling} "
+                f"wd={args.weight_decay} max_grad_norm={args.max_grad_norm} "
+                f"gram_topk={args.gram_topk} sinkhorn_iters={args.sinkhorn_iters} gram_scale={args.gram_scale} "
                 f"eval_every={eval_every} eval_pooling={args.eval_pooling} seed={args.seed}")
 
     tokenizer = AutoTokenizer.from_pretrained(backbone)
@@ -146,12 +177,12 @@ def main():
     rank_sentences = load_sentences(ROOT / base_cfg["data"]["rank_eval_path"])
     logger.info(f"[simcse] train sentences={len(sentences)} rank_eval={len(rank_sentences)}")
 
-    steps_per_epoch = len(sentences) // args.batch_size
+    steps_per_epoch = -(-len(sentences) // args.batch_size)   # 원본 HF Trainer는 drop_last=False (ceil)
     max_steps = int(args.epochs * steps_per_epoch) if args.epochs else args.max_steps
     logger.info(f"[simcse] steps_per_epoch={steps_per_epoch} -> max_steps={max_steps}")
 
     model = SimCSEModel(backbone, args.dropout).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     warmup = max(0, int(args.warmup_frac * max_steps))
     make_sched = get_linear_schedule_with_warmup if args.scheduler == "linear" else get_cosine_schedule_with_warmup
     scheduler = make_sched(optimizer, warmup, max_steps)
@@ -188,7 +219,8 @@ def main():
         while True:
             order = list(range(len(sentences)))
             random.shuffle(order)
-            for i in range(0, len(order) - args.batch_size + 1, args.batch_size):
+            # 원본은 마지막 부분 배치도 버리지 않는다(drop_last=False).
+            for i in range(0, len(order), args.batch_size):
                 yield [sentences[j] for j in order[i:i + args.batch_size]]
 
     model.train()
@@ -202,12 +234,13 @@ def main():
             # 같은 배치를 두 번 통과 - dropout 마스크가 달라 서로 다른 뷰가 된다(SimCSE의 증강)
             z1 = model.train_embed(enc["input_ids"], enc["attention_mask"])
             z2 = model.train_embed(enc["input_ids"], enc["attention_mask"])
-            loss, aux = info_nce(z1.float(), z2.float(), args.temperature)
+            loss, aux = info_nce(z1.float(), z2.float(), args.temperature,
+                                 args.gram_topk, args.sinkhorn_iters, args.gram_scale)
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e10).item()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm).item()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
