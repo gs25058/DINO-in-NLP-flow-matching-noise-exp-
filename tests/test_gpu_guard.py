@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from scripts.gpu_guard import admission_reason, registry
+from scripts.gpu_guard import admission_reason, registry, select_gpu
 
 
 @pytest.fixture
@@ -36,6 +36,16 @@ def test_memory_and_utilization_are_both_required(gpus):
     assert admission_reason("0", gpus, [], [], "me") is not None
     gpus["0"].update(free=48000, util=98)
     assert admission_reason("0", gpus, [], [], "me") is not None
+
+
+def test_auto_selection_excludes_blocked_occupied_and_reserved_gpus(gpus):
+    processes = [{"uuid":"GPU-0", "pid":10, "owner":"gs25049"},
+                 {"uuid":"GPU-1", "pid":11, "owner":"other"}]
+    assert select_gpu("auto", gpus, processes, [{"uuid":"GPU-2"}], "me") == ("3", None)
+    selected, reason = select_gpu("auto", gpus, processes, [{"uuid":"GPU-2"},{"uuid":"GPU-3"}], "me")
+    assert selected is None
+    assert "account GPU process limit" in reason
+    assert select_gpu("0", gpus, processes, [], "me")[0] is None
 
 
 def test_registry_persists_pending_jobs_across_invocations(tmp_path):

@@ -33,6 +33,9 @@ uv run python scripts/gpu_guard.py --gpu "$GPU" --wait -- \
 `--timeout <초>`는 자식 작업의 실행 시간을 제한하고, 시간 초과 또는 종료 신호를 받으면
 자신이 실행한 프로세스 그룹만 종료한 뒤 예약을 해제한다.
 
+`--gpu auto`는 동일한 계정 잠금 안에서 모든 GPU를 검사하여 규약을 만족하는 완전 유휴 GPU를
+선택한 뒤 UUID로 고정한다. 유휴 GPU가 없으면 `--wait`로 대기한다. 점유 GPU에 함께 올리지 않는다.
+
 `run_study.sh`/`tune.py`는 매 trial을 이 실행기로 전달한다. 직접 실행하는 다른 GPU 도구도
 위 방식이나 `env.sh`의 `flowdino_gpu_python` 함수로 감싸서 사용한다.
 날짜·run이 고정된 과거 실행기는 로컬 실험 보관소로 옮겼다([정리 기록](docs/local-cleanup-20261028.md)).

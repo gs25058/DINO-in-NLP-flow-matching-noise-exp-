@@ -1,5 +1,8 @@
 # 공분산 등방성 정규화 완화와 구성 항 분리 — 사전 등록
 
+**프로토콜 전환:** 2026-10-28 사용자 요청으로 고정 매트릭스를 중단했다.
+현재 실행 명세는 [공동 Optuna 최적화](OPTUNA_SPEC.md)다. 아래는 원래 사전 등록 기록으로 보존한다.
+
 등록일: 2026-10-28 (Asia/Seoul). 새 실험을 위한 별도 명세이며 기존 METHOD.md는 변경하지 않는다.
 작업 시작: `536eea1`, clean `exp/coviso-ablation-sts7`에서 `exp/coviso-component-relaxation` 생성.
 main 병합·원격 push 없음. 실행 전에 이 명세와 소스 스냅샷의 해시를 고정한다.

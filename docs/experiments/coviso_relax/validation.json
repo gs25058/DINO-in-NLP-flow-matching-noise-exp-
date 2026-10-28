@@ -1,6 +1,6 @@
 {
   "before_tests": 94,
-  "after_tests": 106,
+  "after_tests": 114,
   "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q",
   "smoke_campaign": "results/experiments/coviso_relax_smoke_20261028",
   "smoke_steps": 60,
@@ -17,5 +17,7 @@
   "smoke_exit_codes": [
     0,
     0
-  ]
+  ],
+  "joint_optuna_tests": 7,
+  "joint_gpu_admission_tests": 7
 }

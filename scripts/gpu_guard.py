@@ -59,6 +59,18 @@ def admission_reason(gpu, gpus, processes, reservations, owner, min_free_mib=350
     return None
 
 
+def select_gpu(requested, gpus, processes, reservations, owner, min_free_mib=35000, max_util=30):
+    """Select and reserve under the existing account lock; auto never shares a GPU."""
+    candidates = sorted(gpus, key=int) if requested == "auto" else [requested]
+    reasons = []
+    for gpu in candidates:
+        reason = admission_reason(gpu, gpus, processes, reservations, owner, min_free_mib, max_util)
+        if reason is None:
+            return gpu, None
+        reasons.append(f"{gpu}: {reason}")
+    return None, "; ".join(reasons) or "no GPUs found"
+
+
 def alive(pid):
     try:
         os.kill(pid, 0)
@@ -102,7 +114,7 @@ def stop_child(child):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--gpu", required=True, help="physical nvidia-smi GPU index")
+    ap.add_argument("--gpu", required=True, help="physical nvidia-smi GPU index, or auto for an entirely idle GPU")
     ap.add_argument("--wait", action="store_true")
     ap.add_argument("--poll-seconds", type=float, default=30)
     ap.add_argument("--min-free-mib", type=int, default=35000)
@@ -131,15 +143,16 @@ def main():
         while child is None:
             with registry(directory) as rows:
                 gpus, processes = snapshot()
-                reason = admission_reason(args.gpu, gpus, processes, rows, pwd.getpwuid(os.getuid()).pw_name,
-                                          args.min_free_mib, args.max_util)
-                if reason is None:
-                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[args.gpu]["uuid"], CUDA_DEVICE_ORDER="PCI_BUS_ID")
+                selected, reason = select_gpu(args.gpu, gpus, processes, rows, pwd.getpwuid(os.getuid()).pw_name,
+                                              args.min_free_mib, args.max_util)
+                if selected is not None:
+                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[selected]["uuid"], CUDA_DEVICE_ORDER="PCI_BUS_ID")
+                    print(f"[gpu_guard] admitted GPU {selected} ({gpus[selected]['uuid']})", file=sys.stderr, flush=True)
                     # Defer interruption until cleanup has the child's PID.
                     starting = True
                     try:
                         child = subprocess.Popen(command, env=env, start_new_session=True)
-                        rows.append({"uuid": gpus[args.gpu]["uuid"], "guard_pid": os.getpid(),
+                        rows.append({"uuid": gpus[selected]["uuid"], "guard_pid": os.getpid(),
                                      "child_pid": child.pid})
                     finally:
                         starting = False
