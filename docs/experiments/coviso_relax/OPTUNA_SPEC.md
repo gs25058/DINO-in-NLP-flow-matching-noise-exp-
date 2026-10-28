@@ -1,7 +1,7 @@
 # 공동 Optuna 최적화 — 변경된 사전 등록
 
 2026-10-28, 사용자 지시로 고정 성분 매트릭스를 중단하고 **성능 최적화**로 전환했다.
-`SPEC.md`의 4×2 매트릭스·성분별 인과 판정·조건부 감쇠 순서를 이 프로토콜로 대체한다.
+성분별 인과 판정·조건부 감쇠 대신, 아래의 공동 탐색과 추가 시드 검증으로 후보를 선택한다.
 이미 완료된 control 42/43은 보존하고, 중단된 both1 run은 완료 trial로 사용하지 않는다.
 
 ## 목적과 고정 조건
@@ -46,7 +46,10 @@ teacher EMA 시작값 0.997, 정규화 시작 step 56, head 크기와 구조는 
 
 기본 총 **40 attempted trial 이내**(완료 기준선 1개 포함, pruned/failed도 예산에 포함).
 고정 seed TPE(multivariate, constant_liar), startup 8개. 원래 baseline과 두 λ=1인 anchor를 포함한다.
-완료된 e7ee9d0 control seed42를 trial0으로 가져오되, 현재 source와 핵심 학습 파일 해시가 같은지 확인한다.
+진행 중인 고정 소스 campaign은 검증한 e7ee9d0 control seed42를 trial0으로 재사용한다.
+리팩토링 후 새 campaign은 동일 방법·예산으로 대조군 42/43을 독립 학습하고 seed42를 trial0으로 기록한다.
+소스·config·데이터가 완전히 동일한 완료 대조군에 한해 명시적 import를 허용한다.
+이는 실행 소스 검증을 위한 경로이며 목적함수·탐색 공간·예산·선택 규칙은 변경하지 않는다.
 원본 resolved config·checkpoint·명령·데이터/초기값 증거 경로를 함께 보존한다.
 
 MedianPruner: 완료 startup 8개, warmup 2000 step, 500-step 간격, 최소 비교값 4개.
@@ -58,7 +61,7 @@ pruned run은 완료 4000-step 결과와 구분하며, 최종 후보는 반드�
 ## 추가 시드와 test 평가
 
 완료 trial의 dev best 상위 3개 설정을 고정하고 seed43·44로 검증한다.
-대조군도 3시드로 비교한다(control seed43 기존 완주 결과는 동일 핵심 소스임을 확인해 재사용).
+대조군도 3시드로 비교한다(control seed43은 같은 소스로 완주한 대조군을 사용).
 각 후보의 3시드 dev best 평균으로 최종 후보를 선택하고 동률은 trial 번호로 결정한다.
 3시드 mean/SD, paired Δ, last와 표현 기하, 손실/gradient를 모두 보고한다.
 

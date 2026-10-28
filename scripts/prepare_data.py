@@ -1,25 +1,19 @@
-"""SimCSE wiki1m 문장 추출 + 토큰 임베딩 통계(mu, sigma) 사전 계산 (METHOD.md 데이터/§2.1 절).
-
-로그인 노드(네트워크 가능)에서 실행:
-    source scripts/env.sh && uv run python scripts/prepare_data.py
-
-출력:
-    data/sentences.jsonl            - 필터링된 전체 학습 문장 (10자 미만 제거)
-    data/rank_eval_sentences.jsonl  - effective rank 평가용 고정 2048 문장 (학습 통계용과 분리)
-    data/embed_stats.pt             - {"mean": mu[D], "std": sigma[D]} (비특수/비패딩 토큰 기준)
-"""
+"""Prepare wiki1m sentences and embedding statistics in a new output directory."""
 
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
 import torch
 from huggingface_hub import hf_hub_download
 from transformers import AutoModel, AutoTokenizer
 
-BACKBONE = "answerdotai/ModernBERT-base"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from src.train import load_config  # noqa: E402
+
 SEED = 0
 STATS_N = 10_000
 RANK_EVAL_N = 2_048
@@ -83,10 +77,19 @@ def write_jsonl(path: Path, sentences: list[str]) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=str(ROOT / "configs/coviso_relax/control.yaml"))
+    parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = load_config(args.config)
+    backbone = cfg["model"]["backbone"]
+    outputs = {
+        key: args.out_dir / Path(cfg["data"][key]).name
+        for key in ("sentences_path", "rank_eval_path", "embed_stats_path")
+    }
+    if any(path.exists() for path in outputs.values()):
+        parser.error("existing data preserved; use a new --out-dir")
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print("[prepare_data] downloading wiki1m_for_simcse.txt ...")
     sentences = download_sentences()
@@ -99,24 +102,24 @@ def main():
     stats_sentences = shuffled[:STATS_N]
     rank_eval_sentences = shuffled[STATS_N : STATS_N + RANK_EVAL_N]
 
-    sentences_path = DATA_DIR / "sentences.jsonl"
+    sentences_path = outputs["sentences_path"]
     write_jsonl(sentences_path, sentences)
     print(f"[prepare_data] wrote {sentences_path} ({len(sentences)} sentences)")
 
-    rank_eval_path = DATA_DIR / "rank_eval_sentences.jsonl"
+    rank_eval_path = outputs["rank_eval_path"]
     write_jsonl(rank_eval_path, rank_eval_sentences)
     print(f"[prepare_data] wrote {rank_eval_path} ({len(rank_eval_sentences)} sentences)")
 
-    print(f"[prepare_data] loading {BACKBONE} for embedding stats ...")
-    tokenizer = AutoTokenizer.from_pretrained(BACKBONE)
-    model = AutoModel.from_pretrained(BACKBONE)
+    print(f"[prepare_data] loading {backbone} for embedding stats ...")
+    tokenizer = AutoTokenizer.from_pretrained(backbone)
+    model = AutoModel.from_pretrained(backbone)
     model.eval().to(args.device)
     embed_layer = model.get_input_embeddings()
 
     print(f"[prepare_data] computing mu/sigma over {len(stats_sentences)} sentences ...")
     mean, std = compute_embed_stats(stats_sentences, tokenizer, embed_layer, args.device)
 
-    stats_path = DATA_DIR / "embed_stats.pt"
+    stats_path = outputs["embed_stats_path"]
     torch.save({"mean": mean, "std": std}, stats_path)
     print(f"[prepare_data] wrote {stats_path} (dim={mean.shape[0]})")
 

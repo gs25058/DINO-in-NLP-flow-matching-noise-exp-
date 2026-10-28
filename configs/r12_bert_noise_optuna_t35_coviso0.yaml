@@ -1,7 +1,0 @@
-# 챔피언(r12 t35)에서 L_iso(cov_iso)만 끈 절제 run - 7-task 절제표의 "① 노이즈 뷰" 행.
-# "② + L_iso" 행은 챔피언 그대로(r12_bert_noise_optuna_t35)이므로 두 행의 차이는 cov_iso_lambda 하나뿐이다.
-# lr/head_lr/grad_clip은 r7에서 cov_iso와 함께 튜닝된 값이지만 절제의 정의상 그대로 둔다.
-extends: r12_bert_noise_optuna_t35.yaml
-run_name: r12_bert_noise_optuna_t35_coviso0
-loss:
-  cov_iso_lambda: 0.0

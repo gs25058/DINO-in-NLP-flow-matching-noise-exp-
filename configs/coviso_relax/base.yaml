@@ -1,31 +1,21 @@
-# R18 control with shared measurement/checkpoint instrumentation; no objective change.
+# R18 control; all joint-search trials inherit the same training method.
 model:
   backbone: bert-base-uncased
-  pooling: mean
   head:
     logit_dim: 8192
     bottleneck_dim: 256
 train:
   batch_size: 32
   max_steps: 4000
-  optimizer: adamw
   lr: 6.876495483323049e-05
   weight_decay: 0.226
-  scheduler: warmup_cosine
   warmup_frac: 0.0517088539939031
-  teacher_momentum: 0.997
   momentum_start: 0.997
   momentum_end: 0.9985014352751024
   head_lr: 0.0005824833585133
-  exclude_ln_bias_wd: true
   grad_clip: 5.590297628724676
   momentum_ramp_frac: 0.4077115063691495
-  momentum_shape: cosine
-  data_order: epoch
-  batch_views: true
   tf32: true
-  record_components: true
-  record_provenance: true
   component_grad_steps:
   - 0
   - 56
@@ -43,36 +33,21 @@ eval:
   every_steps: 250
   log_every_steps: 10
   batch_kl_pairs: 256
-  save_best: true
-logging:
-  backend: wandb
-  wandb_mode: disabled
 run_name: coviso_relax_control
 seed: 42
 augment:
-  kind: flow_noise
-  mode: anchor
   num_student_views: 3
   t_lo: 0.3919166650119331
   t_start: 0.4638073616095715
   t_max: 0.8811226221985871
   warmup_frac: 0.02545633588184152
-  delta_t: 0.1
-  time_embed: false
-  token_latent_views: 0
 loss:
   warmup_teacher_temp: 0.0494051972253961
   teacher_temp: 0.1347501197840043
   teacher_temp_warmup_frac: 0.0789677221858058
   student_temp: 0.151
   center_momentum: 0.92
-  velocity_head: false
-  velocity_lambda: 0.05
-  cov_iso_lambda: 5.874093568592943
   cov_ema_momentum: 0.8195105695006707
   cov_iso_start_step: 56
-  teacher_temp_shape: cosine
-  ibot_lambda: 0.0
-  token_latent_lambda: 0.0
-collapse_guard:
-  enabled: false
+  cov_iso_mean_lambda: 5.874093568592943
+  cov_iso_cov_lambda: 5.874093568592943

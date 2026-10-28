@@ -1,4 +1,5 @@
 """Bounded joint search around the measured R18 control (performance, not ablation)."""
+
 import copy
 import math
 
@@ -28,8 +29,10 @@ SPACE = {
 
 
 def distributions():
-    return {key: optuna.distributions.FloatDistribution(lo, hi, log=log)
-            for key, (lo, hi, log) in SPACE.items()}
+    return {
+        key: optuna.distributions.FloatDistribution(lo, hi, log=log)
+        for key, (lo, hi, log) in SPACE.items()
+    }
 
 
 def baseline_parameters(cfg):
@@ -38,10 +41,7 @@ def baseline_parameters(cfg):
         if key.startswith("_"):
             continue
         section, name = key.split(".")
-        value = cfg[section].get(name)
-        if value is None and name in ("cov_iso_mean_lambda", "cov_iso_cov_lambda"):
-            value = cfg["loss"]["cov_iso_lambda"]
-        result[key] = float(value)
+        result[key] = float(cfg[section][name])
     aug = cfg["augment"]
     result["_t_span"] = aug["t_max"] - aug["t_lo"]
     result["_t_start_frac"] = (aug["t_start"] - aug["t_lo"]) / result["_t_span"]
@@ -66,5 +66,7 @@ def config_from_parameters(base, params):
 
 
 def suggest_config(trial, base):
-    params = {key: trial.suggest_float(key, lo, hi, log=log) for key, (lo, hi, log) in SPACE.items()}
+    params = {
+        key: trial.suggest_float(key, lo, hi, log=log) for key, (lo, hi, log) in SPACE.items()
+    }
     return config_from_parameters(base, params)

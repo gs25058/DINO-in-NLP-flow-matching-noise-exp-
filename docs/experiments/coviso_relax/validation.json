@@ -1,23 +1,28 @@
 {
-  "before_tests": 94,
-  "after_tests": 114,
+  "reference_commit": "e1d2ea33339e8040fbbcdfd97d8b984df51779d2",
+  "before_tests": 114,
+  "after_tests": 59,
+  "reference_fixture": "tests/fixtures/r18_cpu_reference.json",
+  "reference_fixture_sha256": "48735b59ed8eaf07c540f4a4e5244b6933d0d847d16133caffb4325097cb107f",
+  "cpu_cases": {
+    "settings": [
+      "control",
+      "joint"
+    ],
+    "seeds": [
+      42,
+      43
+    ],
+    "steps_per_case": 60,
+    "schedule_steps": 4000,
+    "covariance_start_step": 56,
+    "outputs_gradients_student_teacher_covariance_rng_bit_identical": true,
+    "all_4000_temperature_and_momentum_points_bit_identical": true
+  },
+  "controller_integration": "fresh controls, 4 attempts, 3-seed shortlist, selection before test; synthetic child results only",
+  "gpu_validation": "not run: the existing immutable-source experiment uses both account GPU slots",
+  "existing_campaign_snapshot_unchanged": true,
+  "preexisting_report_excluded_from_commit": true,
   "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q",
-  "smoke_campaign": "results/experiments/coviso_relax_smoke_20261028",
-  "smoke_steps": 60,
-  "schedule_steps": 4000,
-  "smoke_state": {
-    "stage": "smoke_complete"
-  },
-  "initialization_audit": {
-    "same_initialization_per_seed": true,
-    "sha256": {
-      "42": "87c4062464178922bdd2334eeefae49da8f67003f6b9e36ee7e09a3f8561d241"
-    }
-  },
-  "smoke_exit_codes": [
-    0,
-    0
-  ],
-  "joint_optuna_tests": 7,
-  "joint_gpu_admission_tests": 7
+  "details": "docs/refactor-20261028.md"
 }

@@ -3,18 +3,19 @@
 Uses only stdlib. Admission and pending starts are serialized across launchers
 of this account. Unmanaged jobs are included through nvidia-smi snapshots.
 """
+
 import argparse
 import csv
 import fcntl
 import json
 import os
 import pwd
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 BLOCKED_OWNERS = {"gs25009", "gs25049"}
 MAX_PROCESSES = 2
@@ -23,18 +24,29 @@ MAX_PROCESSES = 2
 def snapshot():
     def query(kind, fields):
         output = subprocess.check_output(
-            ["nvidia-smi", f"--query-{kind}={fields}", "--format=csv,noheader,nounits"], text=True)
+            ["nvidia-smi", f"--query-{kind}={fields}", "--format=csv,noheader,nounits"],
+            text=True,
+        )
         return list(csv.reader(output.splitlines(), skipinitialspace=True))
 
     gpus = {}
-    for index, uuid, util, used, total in query("gpu", "index,uuid,utilization.gpu,memory.used,memory.total"):
+    for index, uuid, util, used, total in query(
+        "gpu", "index,uuid,utilization.gpu,memory.used,memory.total"
+    ):
         gpus[index] = {"uuid": uuid, "util": int(util), "free": int(total) - int(used)}
     processes = []
     for uuid, pid, _name, _memory in query("compute-apps", "gpu_uuid,pid,process_name,used_memory"):
-        result = subprocess.run(["ps", "-o", "user=", "-p", pid], capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            ["ps", "-o", "user=", "-p", pid],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         owner = result.stdout.strip()
         if not owner:
-            raise RuntimeError(f"cannot establish GPU process owner for PID {pid}; retry after refreshing")
+            raise RuntimeError(
+                f"cannot establish GPU process owner for PID {pid}; retry after refreshing"
+            )
         processes.append({"uuid": uuid, "pid": int(pid), "owner": owner})
     return gpus, processes
 
@@ -114,7 +126,11 @@ def stop_child(child):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--gpu", required=True, help="physical nvidia-smi GPU index, or auto for an entirely idle GPU")
+    ap.add_argument(
+        "--gpu",
+        required=True,
+        help="physical nvidia-smi GPU index, or auto for an entirely idle GPU",
+    )
     ap.add_argument("--wait", action="store_true")
     ap.add_argument("--poll-seconds", type=float, default=30)
     ap.add_argument("--min-free-mib", type=int, default=35000)
@@ -143,17 +159,37 @@ def main():
         while child is None:
             with registry(directory) as rows:
                 gpus, processes = snapshot()
-                selected, reason = select_gpu(args.gpu, gpus, processes, rows, pwd.getpwuid(os.getuid()).pw_name,
-                                              args.min_free_mib, args.max_util)
+                selected, reason = select_gpu(
+                    args.gpu,
+                    gpus,
+                    processes,
+                    rows,
+                    pwd.getpwuid(os.getuid()).pw_name,
+                    args.min_free_mib,
+                    args.max_util,
+                )
                 if selected is not None:
-                    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[selected]["uuid"], CUDA_DEVICE_ORDER="PCI_BUS_ID")
-                    print(f"[gpu_guard] admitted GPU {selected} ({gpus[selected]['uuid']})", file=sys.stderr, flush=True)
+                    env = dict(
+                        os.environ,
+                        CUDA_VISIBLE_DEVICES=gpus[selected]["uuid"],
+                        CUDA_DEVICE_ORDER="PCI_BUS_ID",
+                    )
+                    print(
+                        f"[gpu_guard] admitted GPU {selected} ({gpus[selected]['uuid']})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     # Defer interruption until cleanup has the child's PID.
                     starting = True
                     try:
                         child = subprocess.Popen(command, env=env, start_new_session=True)
-                        rows.append({"uuid": gpus[selected]["uuid"], "guard_pid": os.getpid(),
-                                     "child_pid": child.pid})
+                        rows.append(
+                            {
+                                "uuid": gpus[selected]["uuid"],
+                                "guard_pid": os.getpid(),
+                                "child_pid": child.pid,
+                            }
+                        )
                     finally:
                         starting = False
                     if pending_signal is not None:
@@ -166,7 +202,10 @@ def main():
         try:
             return child.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            print("[gpu_guard] runtime timeout; stopping this job's process group", file=sys.stderr)
+            print(
+                "[gpu_guard] runtime timeout; stopping this job's process group",
+                file=sys.stderr,
+            )
             return 124
     finally:
         if child is not None:
