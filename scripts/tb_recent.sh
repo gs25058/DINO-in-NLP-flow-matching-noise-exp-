@@ -21,4 +21,11 @@ if [[ ! -d "$LOGDIR" ]]; then
 fi
 
 source "$ROOT/scripts/env.sh" 2>/dev/null || true
+TB="$UV_PROJECT_ENVIRONMENT/bin/tensorboard"
+if [[ -x "$PY" && -x "$(dirname "$PY")/tensorboard" ]]; then
+  TB="$(dirname "$PY")/tensorboard"
+fi
+if [[ -x "$TB" ]]; then
+  exec "$TB" --logdir "$LOGDIR" --port "$PORT" --host 0.0.0.0
+fi
 exec uv run tensorboard --logdir "$LOGDIR" --port "$PORT" --host 0.0.0.0

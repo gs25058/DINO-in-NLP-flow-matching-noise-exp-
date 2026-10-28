@@ -25,6 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
+from src.collapse_guard import CollapseGuard
 from src.diagnostics import active_prototype_count, tbin_index
 from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
@@ -79,6 +80,41 @@ def load_sentences(path) -> list[str]:
     return sentences
 
 
+class BatchIndexSampler:
+    """Legacy random sampling, or opt-in shuffled epochs with full batches.
+
+    Epoch mode drops the final incomplete batch. SimCSE's separate baseline
+    keeps it instead. The default consumes exactly the legacy RNG sequence.
+    """
+
+    def __init__(self, n: int, batch_size: int, order: str = "sample", rng=random):
+        if order not in ("sample", "epoch"):
+            raise ValueError(f"unknown data_order: {order!r} (sample|epoch)")
+        if not 0 < batch_size <= n:
+            raise ValueError(f"batch_size must be between 1 and dataset size ({n})")
+        self.n, self.batch_size, self.order, self.rng = n, batch_size, order, rng
+        self.epoch = 0
+        self._perm: list[int] = []
+        self._cursor = 0
+        if order == "epoch":
+            self._reshuffle()
+
+    def _reshuffle(self) -> None:
+        self._perm = list(range(self.n))
+        self.rng.shuffle(self._perm)
+        self._cursor = 0
+
+    def next(self) -> list[int]:
+        if self.order == "sample":
+            return self.rng.sample(range(self.n), self.batch_size)
+        if self._cursor + self.batch_size > self.n:
+            self.epoch += 1
+            self._reshuffle()
+        idx = self._perm[self._cursor:self._cursor + self.batch_size]
+        self._cursor += self.batch_size
+        return idx
+
+
 def _is_no_decay_param(name: str) -> bool:
     """bias 또는 정규화 레이어(LayerNorm/norm) 파라미터인지, 이름 기반으로 판정.
     BERT는 "LayerNorm.weight"/"...bias", ModernBERT는 bias 없이 "norm.weight"만 씀
@@ -128,7 +164,7 @@ def build_param_groups(
 
 
 def build_augment(cfg: dict) -> FlowNoiseAug:
-    stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], weights_only=True)
+    stats = torch.load(ROOT / cfg["data"]["embed_stats_path"], map_location="cpu", weights_only=True)
     a = cfg["augment"]
     warmup_steps = max(1, int(a["warmup_frac"] * cfg["train"]["max_steps"]))
     return FlowNoiseAug(
@@ -285,8 +321,18 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         drift_sentences = [rank_eval_sentences[i] for i in drift_idx]
 
     student.train()
+    guard = CollapseGuard(cfg.get("collapse_guard", {}), max_steps)
+    last_ok_eval_step = -1
+    collapsed = False
+    sts = eff_rank = uniformity = float("nan")
+    data_order = cfg["train"].get("data_order", "sample")
+    batch_sampler = BatchIndexSampler(len(sentences), batch_size, data_order)
+    logger.info(f"[train] data_order={data_order} drop_last=True")
     for step in range(max_steps):
-        batch_sentences = random.sample(sentences, batch_size)
+        previous_epoch = batch_sampler.epoch
+        batch_sentences = [sentences[i] for i in batch_sampler.next()]
+        if batch_sampler.epoch != previous_epoch:
+            logger.info(f"[step {step}] data_epoch={batch_sampler.epoch}")
         enc = tokenizer(
             batch_sentences, truncation=True, max_length=max_tokens, padding=True,
             return_special_tokens_mask=True, return_tensors="pt",
@@ -443,6 +489,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 tb_writer.add_scalar(f"train/{k}", v, step)
             logger.info(f"[step {step}] " + " ".join(f"{k}={v:.4f}" for k, v in log.items()))
 
+            reason = guard.observe_train(step, log["H_p_bar_t"], log["batch_KL"])
+            if reason:
+                logger.info(f"[step {step}] COLLAPSE ABORT {reason} last_ok_eval_step={last_ok_eval_step}")
+                collapsed = True
+                break
+
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
         if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
             space_metrics = sts_b_dev_metrics_by_space(student, tokenizer, device, eval_spaces)
@@ -483,6 +535,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             for k, v in eval_log.items():
                 tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
+            reason = guard.observe_rank(step, eff_rank)
+            if reason:
+                logger.info(f"[step {step}] COLLAPSE ABORT {reason} last_ok_eval_step={last_ok_eval_step}")
+                collapsed = True
+                break
+            last_ok_eval_step = step
 
     if cfg["train"].get("save_checkpoint", True):
         ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
@@ -491,6 +549,9 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             "state_dict": student.state_dict(),
             "model_cfg": cfg["model"],
             "teacher_state_dict": teacher.model.state_dict(),
+            "train_status": "collapsed" if collapsed else "complete",
+            "last_ok_eval_step": last_ok_eval_step,
+            "train_cfg": cfg["train"],
         }, ckpt_path)
         logger.info(f"[train] saved checkpoint -> {ckpt_path}")
 

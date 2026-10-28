@@ -16,7 +16,7 @@ CLAUDE.md 원칙("기존 Table 1 하이퍼파라미터는 근거 없이 변경 �
 
 실행:
     uv run python scripts/tune.py --base-config configs/r2_uniform_push.yaml \
-        --space uniform_push --n-trials 20 --max-steps 750 --n-jobs 4 --gpus 0,1,2,3
+        --space uniform_push --n-trials 20 --max-steps 750 --n-jobs 2 --gpus 0,1
 """
 import argparse
 import copy
@@ -167,6 +167,20 @@ def set_by_path(cfg: dict, dotted: str, value) -> None:
     node[keys[-1]] = value
 
 
+def parse_collapsed_sts(log_path: Path) -> float | None:
+    """Score measured collapse, while leaving ordinary crashes as incomplete."""
+    if not log_path.exists():
+        return None
+    text = log_path.read_text(errors="ignore")
+    if "COLLAPSE ABORT" not in text:
+        return None
+    valid = re.findall(r"COLLAPSE ABORT[^\n]*last_ok_eval_step=(-?\d+)", text)
+    ceiling = int(valid[-1]) if valid else float("inf")
+    hits = [(int(s), float(v)) for s, v in re.findall(r"\[step (\d+)\] EVAL sts_b_dev=([-\d.eE+]+)", text)]
+    hits = [v for s, v in hits if s <= ceiling]
+    return hits[-1] if hits else 0.0
+
+
 def parse_final_sts(log_path: Path, min_step: int = 0) -> float | None:
     """train.log에서 마지막 'EVAL sts_b_dev=...' 값을 읽는다. 없으면 None(실패/미완주).
 
@@ -203,7 +217,8 @@ class GpuPool:
 
 
 def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: int,
-              seed: int, gpu_pool: GpuPool, timeout: int, study_name: str) -> float:
+              seed: int, gpu_pool: GpuPool, timeout: int, study_name: str,
+              save_checkpoints: bool = False) -> float:
     cfg = copy.deepcopy(base_cfg)
     pseudo: dict = {}
     for dotted, (kind, kwargs) in SEARCH_SPACES[space_name].items():
@@ -226,7 +241,7 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
     # 쓰면 어떤 search space를 탐색 중인지(예: koleo_lambda)가 trial 이름에서 사라진다.
     cfg["run_name"] = f"{study_name}_t{trial.number}"
     cfg["train"]["max_steps"] = max_steps
-    cfg["train"]["save_checkpoint"] = False  # trial 결과는 train.log의 sts_b_dev만으로 충분 - .pt는 아무도 안 읽음
+    cfg["train"]["save_checkpoint"] = save_checkpoints  # opt-in retention for post-hoc STS7
     cfg["seed"] = seed
     # train.py가 학습 종료 시 TensorBoard HPARAMS 탭에 이 trial을 기록하도록 전달한다.
     cfg["_optuna"] = {"study_name": study_name, "trial_number": trial.number, "params": dict(trial.params)}
@@ -240,10 +255,11 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
             yaml.safe_dump(cfg, f)
             tmp_path = f.name
 
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)}
         result = subprocess.run(
-            ["uv", "run", "python", "-m", "src.train", "--config", tmp_path],
-            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=timeout,
+            [sys.executable, str(ROOT / "scripts" / "gpu_guard.py"), "--gpu", str(gpu_id),
+             "--wait", "--timeout", str(timeout), "--", sys.executable,
+             "-m", "src.train", "--config", tmp_path],
+            cwd=str(ROOT), env=os.environ.copy(), capture_output=True, text=True,
         )
     finally:
         gpu_pool.release(gpu_id)
@@ -254,7 +270,12 @@ def run_trial(trial: optuna.Trial, base_cfg: dict, space_name: str, max_steps: i
     # train.py는 step == max_steps-1에서 반드시 EVAL을 찍으므로, 마지막 EVAL이 거기 못 미치면
     # 완주하지 못한 run이다(중도 사망) - 점수 대신 pruned로 처리한다.
     sts = parse_final_sts(log_path, min_step=max_steps - 1)
-    if sts is None:
+    collapsed = parse_collapsed_sts(log_path) if result.returncode == 0 else None
+    if collapsed is not None:
+        trial.set_user_attr("collapsed", True)
+        print(f"[tune] trial {trial.number}: COLLAPSED sts_b_dev={collapsed:.4f}")
+        return collapsed
+    if result.returncode != 0 or sts is None:
         print(f"[tune] trial {trial.number} FAILED/INCOMPLETE params={trial.params}\n"
               f"--- stderr tail ---\n{result.stderr[-2000:]}")
         raise optuna.TrialPruned()
@@ -274,11 +295,19 @@ def main():
     parser.add_argument("--gpus", default="0", help="쉼표로 구분된 GPU id 목록, 앞에서 n_jobs개 사용")
     parser.add_argument("--study-name", default=None)
     parser.add_argument("--timeout", type=int, default=3600, help="trial 하나당 최대 대기(초)")
+    parser.add_argument("--save-checkpoints", action="store_true", help="사후 STS7 평가용 last.pt 보존")
     args = parser.parse_args()
+
+    if not 1 <= args.n_jobs <= 2:
+        parser.error("shared server permits at most 2 concurrent GPU processes")
+    if args.timeout <= 0:
+        parser.error("timeout must be positive")
 
     base_cfg = load_config(Path(args.base_config))
 
     gpu_ids = [int(g) for g in args.gpus.split(",")]
+    if len(set(gpu_ids)) != len(gpu_ids) or len(gpu_ids) < args.n_jobs:
+        parser.error("provide at least n-jobs distinct GPU IDs")
     gpu_pool = GpuPool(gpu_ids[: max(args.n_jobs, 1)])
 
     study_name = args.study_name or f"tune_{Path(args.base_config).stem}_{args.space}"
@@ -290,7 +319,8 @@ def main():
 
     study.optimize(
         lambda trial: run_trial(
-            trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout, study_name
+            trial, base_cfg, args.space, args.max_steps, args.seed, gpu_pool, args.timeout, study_name,
+            args.save_checkpoints,
         ),
         n_trials=args.n_trials, n_jobs=args.n_jobs,
     )

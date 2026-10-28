@@ -3,6 +3,52 @@ from pathlib import Path
 from scripts.tune import parse_final_sts, set_by_path
 
 
+def test_collapsed_score_uses_last_valid_eval_not_incomplete_crash(tmp_path):
+    from scripts.tune import parse_collapsed_sts
+    log = tmp_path / "train.log"
+    log.write_text("[step 0] EVAL sts_b_dev=0.59\n[step 250] EVAL sts_b_dev=0.70\n"
+                   "[step 500] EVAL sts_b_dev=0.10\n"
+                   "[step 500] COLLAPSE ABORT eff_rank=1 last_ok_eval_step=250\n")
+    assert parse_collapsed_sts(log) == 0.70
+    log.write_text("[step 0] EVAL sts_b_dev=0.59\ncrashed\n")
+    assert parse_collapsed_sts(log) is None
+
+
+def test_trial_reuses_interpreter_keeps_requested_checkpoint_and_cleans_config(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import optuna
+    import yaml
+    from scripts import tune
+    monkeypatch.setattr(tune, "ROOT", tmp_path)
+    (tmp_path / "configs").mkdir()
+    pool = tune.GpuPool([1])
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        path = Path(command[-1])
+        captured["path"] = path
+        cfg = yaml.safe_load(path.read_text())
+        captured["cfg"] = cfg
+        log_dir = tmp_path / "results" / "logs" / cfg["run_name"]
+        log_dir.mkdir(parents=True)
+        (log_dir / "train.log").write_text("[step 9] EVAL sts_b_dev=0.71\n")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(tune.subprocess, "run", fake_run)
+    score = tune.run_trial(optuna.trial.FixedTrial({"loss.uniform_push_lr": 0.5}),
+                           {"train": {}, "loss": {}}, "uniform_push", 10, 42, pool, 15,
+                           "test", save_checkpoints=True)
+    assert score == 0.71
+    assert captured["command"][0] == sys.executable
+    assert captured["command"].count(sys.executable) == 2
+    assert captured["cfg"]["train"]["save_checkpoint"] is True
+    assert "--timeout" in captured["command"]
+    assert not captured["path"].exists()
+    assert pool.acquire() == 1
+
+
 def test_set_by_path_nested():
     cfg = {"loss": {"uniform_push_lr": 0.0, "teacher_temp": 0.082}, "train": {"lr": 5.4e-4}}
     set_by_path(cfg, "loss.uniform_push_lr", 1.23)

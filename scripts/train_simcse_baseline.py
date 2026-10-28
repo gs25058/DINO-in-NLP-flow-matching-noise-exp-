@@ -42,6 +42,26 @@ sys.path.insert(0, str(ROOT))
 from src.evaluate import effective_rank_metrics, sts_b_dev_metrics  # noqa: E402
 from src.train import load_config, load_sentences, setup_logger  # noqa: E402
 
+BASELINE_VERSION = "simcse_original_aligned_v1"
+
+
+def sentence_batches(sentences, batch_size, sampling="epoch", rng=random):
+    """Shuffled epochs including their final partial batch (HF drop_last=False)."""
+    if not sentences or batch_size < 1:
+        raise ValueError("sentences must be nonempty and batch_size positive")
+    if sampling not in ("epoch", "with-replacement"):
+        raise ValueError(f"unknown sampling: {sampling}")
+    if sampling == "with-replacement":
+        if batch_size > len(sentences):
+            raise ValueError("batch_size exceeds dataset size for with-replacement sampling")
+        while True:
+            yield rng.sample(sentences, batch_size)
+    while True:
+        order = list(range(len(sentences)))
+        rng.shuffle(order)
+        for i in range(0, len(order), batch_size):
+            yield [sentences[j] for j in order[i:i + batch_size]]
+
 
 class SimCSEModel(nn.Module):
     """BERT + SimCSE MLP pooler.
@@ -56,9 +76,11 @@ class SimCSEModel(nn.Module):
         cfg = AutoConfig.from_pretrained(backbone_name)
         cfg.hidden_dropout_prob = dropout
         cfg.attention_probs_dropout_prob = dropout
-        self.backbone = BertModel.from_pretrained(backbone_name, config=cfg)
+        self.backbone = BertModel.from_pretrained(backbone_name, config=cfg, add_pooling_layer=False)
         h = self.backbone.config.hidden_size
         self.mlp = nn.Sequential(nn.Linear(h, h), nn.Tanh())  # 학습 전용 pooler
+        nn.init.normal_(self.mlp[0].weight, mean=0.0, std=cfg.initializer_range)
+        nn.init.zeros_(self.mlp[0].bias)
 
     def get_input_embeddings(self):
         return self.backbone.get_input_embeddings()
@@ -96,7 +118,7 @@ def info_nce(z1: torch.Tensor, z2: torch.Tensor, temperature: float):
     with torch.no_grad():
         acc = (sim.argmax(dim=1) == labels).float().mean()
         pos = sim.diag().mean() * temperature
-        neg = ((sim.sum(1) - sim.diag()) / (sim.size(0) - 1)).mean() * temperature
+        neg = ((sim.sum(1) - sim.diag()) / (sim.size(0) - 1)).mean() * temperature if sim.size(0) > 1 else sim.new_zeros(())
     return loss, {"infonce_acc": acc.item(), "pos_cos": pos.item(), "neg_cos": neg.item()}
 
 
@@ -105,7 +127,7 @@ def main():
     ap.add_argument("--run-name", default="simcse_baseline_s42")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    # 예산: --epochs를 주면 1 epoch = len(sentences)//batch step (공식 방식)
+    # 예산: --epochs를 주면 1 epoch = ceil(len(sentences)/batch) step
     ap.add_argument("--epochs", type=float, default=None, help="주면 max-steps보다 우선")
     ap.add_argument("--max-steps", type=int, default=1500)
     ap.add_argument("--batch-size", type=int, default=64)
@@ -120,7 +142,15 @@ def main():
     ap.add_argument("--sampling", default="epoch", choices=["epoch", "with-replacement"])
     ap.add_argument("--eval-steps", type=int, default=125)
     ap.add_argument("--eval-pooling", default="cls", help="cls(SimCSE 공식) | last | first_last")
+    ap.add_argument("--weight-decay", type=float, default=0.0)
+    ap.add_argument("--max-grad-norm", type=float, default=1.0)
     args = ap.parse_args()
+    if args.batch_size < 1 or args.max_grad_norm <= 0 or args.eval_steps < 1:
+        ap.error("batch-size, max-grad-norm and eval-steps must be positive")
+    if args.max_steps < 1 or (args.epochs is not None and args.epochs <= 0):
+        ap.error("max-steps and epochs must be positive")
+    if (ROOT / "checkpoints" / args.run_name).exists():
+        ap.error("run-name already has checkpoints; choose a new name to preserve provenance")
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -137,6 +167,7 @@ def main():
     run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     tb_writer = SummaryWriter(log_dir=str(ROOT / "results" / "tensorboard" / args.run_name / run_ts))
     logger.info(f"[simcse] backbone={backbone} batch={args.batch_size} lr={args.lr} "
+                f"baseline_version={BASELINE_VERSION} wd={args.weight_decay} max_grad_norm={args.max_grad_norm} "
                 f"temp={args.temperature} dropout={args.dropout} max_seq_len={max_tokens} "
                 f"sched={args.scheduler} fp16={use_amp} sampling={args.sampling} "
                 f"eval_every={eval_every} eval_pooling={args.eval_pooling} seed={args.seed}")
@@ -146,12 +177,16 @@ def main():
     rank_sentences = load_sentences(ROOT / base_cfg["data"]["rank_eval_path"])
     logger.info(f"[simcse] train sentences={len(sentences)} rank_eval={len(rank_sentences)}")
 
-    steps_per_epoch = len(sentences) // args.batch_size
-    max_steps = int(args.epochs * steps_per_epoch) if args.epochs else args.max_steps
+    steps_per_epoch = -(-len(sentences) // args.batch_size)
+    max_steps = max(1, int(args.epochs * steps_per_epoch)) if args.epochs else args.max_steps
     logger.info(f"[simcse] steps_per_epoch={steps_per_epoch} -> max_steps={max_steps}")
 
     model = SimCSEModel(backbone, args.dropout).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    model_cfg = {"backbone": backbone, "simcse": True, "temperature": args.temperature,
+                 "dropout": args.dropout, "baseline_version": BASELINE_VERSION}
+    training_cfg = dict(vars(args), steps_per_epoch=steps_per_epoch, actual_max_steps=max_steps,
+                        drop_last=False, baseline_version=BASELINE_VERSION)
     warmup = max(0, int(args.warmup_frac * max_steps))
     make_sched = get_linear_schedule_with_warmup if args.scheduler == "linear" else get_cosine_schedule_with_warmup
     scheduler = make_sched(optimizer, warmup, max_steps)
@@ -175,25 +210,13 @@ def main():
             ckpt_dir = ROOT / "checkpoints" / args.run_name
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             torch.save({"state_dict": model.state_dict(),
-                        "model_cfg": {"backbone": backbone, "simcse": True,
-                                      "temperature": args.temperature, "dropout": args.dropout},
+                        "model_cfg": model_cfg, "training_cfg": training_cfg,
                         "best_sts": spearman, "best_step": step}, ckpt_dir / "best.pt")
         model.train()
 
-    def batches():
-        """공식은 데이터셋을 셔플해 1 epoch 순회한다(복원추출이 아니다)."""
-        if args.sampling == "with-replacement":
-            while True:
-                yield random.sample(sentences, args.batch_size)
-        while True:
-            order = list(range(len(sentences)))
-            random.shuffle(order)
-            for i in range(0, len(order) - args.batch_size + 1, args.batch_size):
-                yield [sentences[j] for j in order[i:i + args.batch_size]]
-
     model.train()
     evaluate(0)
-    stream = batches()
+    stream = sentence_batches(sentences, args.batch_size, args.sampling)
     for step in range(max_steps):
         batch = next(stream)
         enc = tokenizer(batch, truncation=True, max_length=max_tokens, padding=True,
@@ -207,7 +230,7 @@ def main():
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e10).item()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm).item()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -225,8 +248,7 @@ def main():
     ckpt_dir = ROOT / "checkpoints" / args.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": model.state_dict(),
-                "model_cfg": {"backbone": backbone, "simcse": True,
-                              "temperature": args.temperature, "dropout": args.dropout}},
+                "model_cfg": model_cfg, "training_cfg": training_cfg},
                ckpt_dir / "last.pt")
     logger.info(f"[simcse] saved checkpoint -> {ckpt_dir / 'last.pt'}")
     logger.info(f"[simcse] best STS-B dev={best['sts']:.4f} @step {best['step']} "

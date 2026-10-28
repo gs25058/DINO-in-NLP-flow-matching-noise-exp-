@@ -5,7 +5,7 @@
 #   1. 우리 계정의 다른 학습이 끝날 때까지 대기 (동시 GPU 2개 제한 준수)
 #   2. base config: BASE_CONFIG로 지정하거나, 미지정 시 1500-step 완주 run 중 시드 평균 최고를 자동 선택
 #   3. gs25009/gs25049가 쓰는 GPU를 제외하고, 진짜 유휴인 GPU만 선택
-#      (util < 30% 그리고 여유 메모리 > 25GB - 여유 메모리만 보면 98% 점유 GPU를 고르게 된다)
+#      (util < 30%, 빈 GPU, 여유 메모리 >= 35GB - 여유 메모리만 보면 98% 점유 GPU를 고르게 된다)
 #      2개를 못 찾으면 1개로라도 진행하고, 하나도 없으면 5분 후 재시도
 #   4. tune.py 실행 - 중간에 죽으면 Optuna SQLite에서 이어받아 자동 재시작
 #      (남은 trial 수만 다시 요청하므로 총 목표치를 넘기지 않는다)
@@ -26,12 +26,18 @@ MAX_STEPS="${MAX_STEPS:-1500}"
 SPACE="${SPACE:-r5_schedules_full}"
 MAX_RESTARTS="${MAX_RESTARTS:-20}"
 N_JOBS="${N_JOBS:-2}"
-# GPU 선택 임계값. 기본값은 "진짜 유휴한 GPU만" 이지만, 서버가 계속 붐벼서 한 trial도 못 도는
-# 상황에서는 MAX_UTIL을 올려 남의 작업과 SM을 나눠 쓰도록 완화할 수 있다(사용자 판단 사항).
+TIMEOUT="${TIMEOUT:-3600}"
+SAVE_FLAGS=()
+if [[ "${SAVE_CKPT:-0}" == 1 ]]; then SAVE_FLAGS+=(--save-checkpoints); fi
+if [[ "$N_JOBS" != 1 && "$N_JOBS" != 2 ]]; then
+  echo "N_JOBS must be 1 or 2 (shared GPU policy)" >&2
+  exit 2
+fi
+# GPU 선택 임계값. compute process가 없는 GPU만 허용한다.
 MAX_UTIL="${MAX_UTIL:-30}"
-MIN_FREE_MIB="${MIN_FREE_MIB:-25000}"
+MIN_FREE_MIB="${MIN_FREE_MIB:-35000}"
 # 절대 쓰지 않을 GPU 소유자 (사용자 지시: 팀원/타 연구실 GPU 회피)
-BLOCKED_OWNERS="gs25009|gs25049"
+# 소유자/동시 사용 검사는 scripts/gpu_guard.py를 공유한다.
 
 log() { echo "[supervisor $(date '+%m-%d %H:%M:%S')] $*"; }
 
@@ -42,14 +48,14 @@ while pgrep -u "$(id -u)" -f "venv/bin/python3 -m src.train" >/dev/null 2>&1; do
 done
 log "기존 학습 없음 - 진행"
 
-source "$ROOT/scripts/env.sh" 2>/dev/null || true
+source "$ROOT/scripts/env.sh"
 export HF_HUB_OFFLINE=1
 
 # ---------- 2. base config 자동 선택 (1500-step 완주한 run 중 시드 평균 최고) ----------
 if [[ -n "${BASE_CONFIG:-}" ]]; then
   log "base config 지정됨: $BASE_CONFIG"
 else
-BASE_CONFIG="$(uv run python - <<'PY'
+BASE_CONFIG="$(flowdino_python - <<'PY'
 from pathlib import Path
 import re, collections
 LOG = Path("results/logs")
@@ -82,35 +88,23 @@ log "study 이름: $STUDY_NAME (SQLite 재개 가능)"
 
 # ---------- 3. 안전한 유휴 GPU 2개 선택 ----------
 pick_gpus() {
-  MAX_UTIL="$MAX_UTIL" MIN_FREE_MIB="$MIN_FREE_MIB" N_JOBS="$N_JOBS" uv run python - <<'PY'
-import subprocess, re
-def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout
-# GPU별 (uuid -> index, 여유메모리)
-import os
-MIN_FREE_MIB = int(os.environ["MIN_FREE_MIB"])  # 우리 run 1개가 ~8GB - 남의 작업과 충돌하지 않을 선
-MAX_UTIL = int(os.environ["MAX_UTIL"])          # 여유 메모리만 보면 98% 점유 GPU를 "여유 있다"고 고른다
-gpus = {}
-for line in sh("nvidia-smi --query-gpu=index,uuid,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits").strip().splitlines():
-    idx, uuid, used, total, util = [x.strip() for x in line.split(",")]
-    gpus[uuid] = {"index": int(idx), "free": int(total) - int(used), "util": int(util), "blocked": False}
-# 차단 소유자가 쓰는 GPU 표시
-for line in sh("nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader").strip().splitlines():
-    if not line.strip():
-        continue
-    uuid, pid = [x.strip() for x in line.split(",")]
-    owner = sh(f"ps -o user= -p {pid}").strip()
-    if re.search(r"gs25009|gs25049", owner) and uuid in gpus:
-        gpus[uuid]["blocked"] = True
-ok = [g for g in gpus.values()
-      if not g["blocked"] and g["util"] < MAX_UTIL and g["free"] > MIN_FREE_MIB]
-ok.sort(key=lambda g: (g["util"], -g["free"]))   # 가장 한가한 것 우선
-print(",".join(str(g["index"]) for g in ok[:int(os.environ.get("N_JOBS", "2"))]))
+  MAX_UTIL="$MAX_UTIL" MIN_FREE_MIB="$MIN_FREE_MIB" N_JOBS="$N_JOBS" flowdino_python - <<'PY'
+import os, pwd
+from pathlib import Path
+from scripts.gpu_guard import snapshot, registry, admission_reason
+gpus, processes = snapshot()
+with registry(Path(f"/tmp/flowdino-gpu-{os.getuid()}")) as reservations:
+    ok = [(idx, gpu) for idx, gpu in gpus.items()
+          if admission_reason(idx, gpus, processes, reservations, pwd.getpwuid(os.getuid()).pw_name,
+                              int(os.environ["MIN_FREE_MIB"]), int(os.environ["MAX_UTIL"])) is None]
+ok.sort(key=lambda item: (item[1]["util"], -item[1]["free"]))
+print(",".join(idx for idx, _ in ok[:int(os.environ["N_JOBS"])]))
 PY
 }
 
 # ---------- 4. 완료 trial 수 조회 ----------
 completed_trials() {
-  uv run python - "$STUDY_NAME" <<'PY' 2>/dev/null || echo 0
+  flowdino_python - "$STUDY_NAME" <<'PY' 2>/dev/null || echo 0
 import sys, optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 name = sys.argv[1]
@@ -145,7 +139,7 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
   fi
 
   log "시도 ${attempt}/${MAX_RESTARTS}: 완료 ${done_n}/${TARGET_TRIALS}, 남은 ${remaining} trial, GPU=${GPUS}"
-  uv run python scripts/tune.py \
+  flowdino_python scripts/tune.py \
     --base-config "configs/${BASE_CONFIG}.yaml" \
     --space "$SPACE" \
     --n-trials "$remaining" \
@@ -153,7 +147,7 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
     --n-jobs "$JOBS" \
     --gpus "$GPUS" \
     --study-name "$STUDY_NAME" \
-    --seed 42
+    --seed 42 --timeout "$TIMEOUT" "${SAVE_FLAGS[@]}"
   rc=$?
   log "tune.py 종료 (exit=$rc)"
 
@@ -175,7 +169,7 @@ done
 final="$(completed_trials | tail -1)"
 log "===== 감독 종료: ${final}/${TARGET_TRIALS} trial 완료 ====="
 if [[ "$final" -gt 0 ]]; then
-  uv run python - "$STUDY_NAME" <<'PY'
+  flowdino_python - "$STUDY_NAME" <<'PY'
 import sys, optuna, json
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 name = sys.argv[1]
