@@ -1,0 +1,21 @@
+{
+  "before_tests": 94,
+  "after_tests": 106,
+  "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q",
+  "smoke_campaign": "results/experiments/coviso_relax_smoke_20261028",
+  "smoke_steps": 60,
+  "schedule_steps": 4000,
+  "smoke_state": {
+    "stage": "smoke_complete"
+  },
+  "initialization_audit": {
+    "same_initialization_per_seed": true,
+    "sha256": {
+      "42": "87c4062464178922bdd2334eeefae49da8f67003f6b9e36ee7e09a3f8561d241"
+    }
+  },
+  "smoke_exit_codes": [
+    0,
+    0
+  ]
+}

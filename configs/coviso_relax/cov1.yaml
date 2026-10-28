@@ -1,0 +1,4 @@
+extends: base.yaml
+run_name: coviso_relax_cov1
+loss:
+  cov_iso_cov_lambda: 1.0

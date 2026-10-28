@@ -1,0 +1,50 @@
+{
+  "upstream_ref": "origin/exp/r18-ibot-token-ce",
+  "upstream_commit": "eed56a1a9f669129a8dbd428443f563ccec35074",
+  "root_config": "configs/r18_bert_ctrl.yaml",
+  "files": {
+    "r18_bert_ctrl.yaml": {
+      "sha256": "5e024eb095c984724c9f390e73ef2bcf9353497eb0f74b0d0c69a7836c69790a",
+      "local_identical": false
+    },
+    "r18_base.yaml": {
+      "sha256": "fafb1d5035bf3b951aa2ac8faea522f9de4a2c3e81bf4c9c0eefde1be4e5becb",
+      "local_identical": false
+    },
+    "r12_bert_noise_optuna_t35.yaml": {
+      "sha256": "067582f74b40032b22c85d49d42fb0b857b0bea2e6292c22b67d53deb3e6a550",
+      "local_identical": true
+    },
+    "r8_bert_coviso_sched_optuna_t50.yaml": {
+      "sha256": "0ec1fa01063d6c961767cee9b06d3bdd8792064d8ff54000a721bbb6d6c1634d",
+      "local_identical": true
+    },
+    "r7_bert_coviso_optuna_t35.yaml": {
+      "sha256": "190dee194093884f1fb89bee7b29ada1c27ad44d56ff09f9ea9d3778757970f5",
+      "local_identical": true
+    },
+    "r5d_bert_lrsplit_c.yaml": {
+      "sha256": "a6c821b1a60f70a953ec12884f36f8720e4b3cb7c5bdd57eaba4defe25fd92a2",
+      "local_identical": true
+    },
+    "r5d_bert.yaml": {
+      "sha256": "e9e64e6a688771426a08284bdd0e35146486db36d345bc6067d89a5a5ea9709e",
+      "local_identical": true
+    },
+    "base_bert.yaml": {
+      "sha256": "a6c38ca98e3b6214bf3239c6978e410b49a3adf648ebfb024cafa6483f3da622",
+      "local_identical": true
+    }
+  },
+  "lambda_0": 5.874093568592943,
+  "launch_flags": [
+    "--batch-views",
+    "--tf32"
+  ],
+  "historical_gpu": "RTX 6000 Ada",
+  "historical_scores": {
+    "sts_b_dev_two_seed_mean": 0.7465,
+    "sts7_two_seed_mean_percent": 66.09
+  },
+  "scores_are_reference_only": true
+}

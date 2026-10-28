@@ -158,6 +158,10 @@ uv run python scripts/plot_dense_trajectory.py \
 
 ## 테스트
 
+새 공분산 성분 완화 실험은 [실행 안내](docs/experiments/coviso_relax/README.md)와
+[사전 등록 명세](docs/experiments/coviso_relax/SPEC.md)를 따른다.
+기존 config의 `cov_iso_lambda`는 보존하며, mean/cov 개별 가중치는 명시한 경우에만 우선한다.
+
 ```bash
 uv run python -m pytest -q
 ```

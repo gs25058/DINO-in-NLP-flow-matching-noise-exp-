@@ -70,8 +70,14 @@ def main():
     ap.add_argument("--pooling", default="auto", choices=["auto", "last", "first_last", "cls"])
     ap.add_argument("--entity", default="student", choices=["student", "teacher"])
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--tf32", action="store_true", help="match an explicitly TF32-enabled training experiment")
     ap.add_argument("--out", default=None, help="결과 json 경로 (기본: results/analysis/sts7_<첫 run>_<pooling>.json)")
     args = ap.parse_args()
+    if args.tf32:
+        if not args.device.startswith("cuda") or torch.cuda.get_device_capability() < (8, 0):
+            ap.error("TF32 evaluation requires an Ampere-or-newer CUDA device")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     cfg = load_config(ROOT / args.config)
     rows = {}

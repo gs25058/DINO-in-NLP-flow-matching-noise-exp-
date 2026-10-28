@@ -167,7 +167,7 @@ class CovIsoPenalty(nn.Module):
         self.register_buffer("mu_ema", torch.zeros(embed_dim))
         self.register_buffer("m2_ema", torch.eye(embed_dim) / embed_dim)
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def forward(self, z: torch.Tensor, *, return_components: bool = False) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         d = z.shape[-1]
         m = self.momentum
         batch_mu = z.mean(dim=0)
@@ -193,7 +193,10 @@ class CovIsoPenalty(nn.Module):
 
         self._update_ema(batch_mu.detach(), batch_m2.detach())
 
-        return l_iso, {"L_iso_mean": l_iso_mean.detach(), "L_iso_cov": l_iso_cov.detach()}
+        aux = {"L_iso_mean": l_iso_mean.detach(), "L_iso_cov": l_iso_cov.detach()}
+        if return_components:
+            aux.update(mean_term=l_iso_mean, cov_term=l_iso_cov)
+        return l_iso, aux
 
     @torch.no_grad()
     def _update_ema(self, batch_mu: torch.Tensor, batch_m2: torch.Tensor) -> None:

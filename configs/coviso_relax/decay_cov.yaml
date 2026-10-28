@@ -1,0 +1,11 @@
+extends: base.yaml
+run_name: coviso_relax_decay_cov
+experiment:
+  conditional_template: true
+  requires_fixed_stage_selection: true
+loss:
+  cov_iso_cov_schedule:
+    shape: cosine
+    start_frac: 0.5
+    end_frac: 1.0
+    min_ratio: 0.1

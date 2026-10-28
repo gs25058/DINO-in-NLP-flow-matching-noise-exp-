@@ -31,6 +31,8 @@ from src.evaluate import (EVAL_SPACES, effective_rank_metrics, embed_sentences,
                           sts_b_dev_metrics_by_space, sts_b_dev_spearman)
 from src.loss import CovIsoPenalty, DINOLoss, EmbedUniformPush, batch_kl_diagnostic, koleo_loss, velocity_loss
 from src.model import DinoTextModel, EMATeacher
+from src.provenance import append_record, record_run
+from src.regularization import backbone_grad_norm, combine_coviso, resolve_coviso_weights
 from src.schedules import resolve_koleo_lambda, teacher_momentum_schedule, teacher_temp_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -182,13 +184,25 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="config의 seed override (매트릭스 다중 시드용)")
     parser.add_argument("--run-name-suffix", default="", help="wandb run_name에 덧붙일 접미사 (예: _seed43)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--batch-views", action="store_true", default=None)
+    parser.add_argument("--tf32", action="store_true", default=None)
+    parser.add_argument("--stop-after-steps", type=int, default=None, help="smoke only: stop without compressing full-budget schedules")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if cfg.get("experiment", {}).get("requires_fixed_stage_selection"):
+        parser.error("conditional decay template requires fixed-stage selection via run_coviso_relax.py")
     if args.max_steps is not None:
         cfg["train"]["max_steps"] = args.max_steps
     if args.seed is not None:
         cfg["seed"] = args.seed
+    for key in ("batch_views", "tf32"):
+        if getattr(args, key) is not None:
+            cfg["train"][key] = getattr(args, key)
+    if args.stop_after_steps is not None:
+        if args.stop_after_steps < 1:
+            parser.error("stop-after-steps must be positive")
+        cfg["train"]["stop_after_steps"] = args.stop_after_steps
     if args.run_name_suffix:
         cfg["run_name"] = cfg["run_name"] + args.run_name_suffix
 
@@ -217,6 +231,16 @@ def main():
 
 
 def _run(cfg, device, max_steps, logger, tb_writer) -> None:
+    record_components = cfg["train"].get("record_components", False)
+    run_dir = ROOT / "results" / "logs" / cfg["run_name"]
+    batch_views = cfg["train"].get("batch_views", False)
+    if cfg["train"].get("tf32", False):
+        if str(device).startswith("cuda") and torch.cuda.get_device_capability() >= (8, 0):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("[train] TF32 enabled, FP32 parameters; AMP disabled")
+        else:
+            logger.info("[train] TF32 unavailable on this device; effective TF32=False")
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
     sentences = load_sentences(ROOT / cfg["data"]["sentences_path"])
     rank_eval_sentences = load_sentences(ROOT / cfg["data"]["rank_eval_path"])
@@ -225,6 +249,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         cfg["model"]["backbone"], cfg["model"]["head"]["bottleneck_dim"], cfg["model"]["head"]["logit_dim"]
     ).to(device)
     teacher = EMATeacher(student, momentum=cfg["train"]["teacher_momentum"])
+    if cfg["train"].get("record_provenance", False):
+        record_run(ROOT, cfg, student, device, sys.argv)
 
     aug = build_augment(cfg)
     dino_loss = DINOLoss(
@@ -236,10 +262,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     embed_uniform_push = EmbedUniformPush(student.backbone.config.hidden_size, embed_push_lr).to(device)
 
     cov_iso_lambda = cfg["loss"].get("cov_iso_lambda", 0.0)
+    initial_mean, initial_cov = resolve_coviso_weights(cfg["loss"], 0, max_steps)
+    gradient_steps = set(cfg["train"].get("component_grad_steps", []))
+    split_components = record_components or bool(gradient_steps) or any(
+        cfg["loss"].get(key) is not None for key in ("cov_iso_mean_lambda", "cov_iso_cov_lambda",
+                                                    "cov_iso_mean_schedule", "cov_iso_cov_schedule"))
     cov_ema_momentum = cfg["loss"].get("cov_ema_momentum", 0.99)
     cov_iso_start_step = cfg["loss"].get("cov_iso_start_step", 50)
     cov_iso_penalty = None
-    if cov_iso_lambda > 0:
+    if initial_mean > 0 or initial_cov > 0:
         cov_iso_penalty = CovIsoPenalty(student.backbone.config.hidden_size, cov_ema_momentum).to(device)
 
     velocity_head = None
@@ -325,10 +356,12 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
     last_ok_eval_step = -1
     collapsed = False
     sts = eff_rank = uniformity = float("nan")
+    best_sts, best_step = -float("inf"), -1
+    steps_to_run = min(max_steps, cfg["train"].get("stop_after_steps", max_steps))
     data_order = cfg["train"].get("data_order", "sample")
     batch_sampler = BatchIndexSampler(len(sentences), batch_size, data_order)
     logger.info(f"[train] data_order={data_order} drop_last=True")
-    for step in range(max_steps):
+    for step in range(steps_to_run):
         previous_epoch = batch_sampler.epoch
         batch_sentences = [sentences[i] for i in batch_sampler.next()]
         if batch_sampler.epoch != previous_epoch:
@@ -365,8 +398,17 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         cov_iso_losses = []
         cov_iso_mean_terms = []
         cov_iso_cov_terms = []
+        mean_terms, cov_terms = [], []
+        fwd = None
+        if batch_views and len(views.student_embeds) > 1:
+            cat_out = student(inputs_embeds=torch.cat(views.student_embeds, dim=0),
+                              attention_mask=torch.cat([attention_mask] * len(views.student_embeds), dim=0))
+            fwd = list(zip(*(x.chunk(len(views.student_embeds), dim=0) for x in cat_out[:3])))
         for k, s_embeds in enumerate(views.student_embeds):
-            s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            if fwd is None:
+                s_embedding, s_logits, s_hidden, *_ = student(inputs_embeds=s_embeds, attention_mask=attention_mask)
+            else:
+                s_embedding, s_logits, s_hidden = fwd[k]
             student_logits.append(s_logits)
             if velocity_head is not None:
                 v_pred = velocity_head(s_hidden)
@@ -377,13 +419,20 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 # EMA 통계는 step 0부터 계속 갱신(자리 잡을 시간을 준다) - cov_iso_start_step
                 # 이전에는 아래에서 total_loss에 더하지 않을 뿐. K개 뷰 전부에 대해 호출하므로
                 # 한 스텝 안에서 버퍼가 K번 순차 갱신된다(뷰마다 다른 노이즈 레벨의 실제 샘플).
-                l_iso, iso_aux = cov_iso_penalty(s_embedding)
+                if split_components:
+                    l_iso, iso_aux = cov_iso_penalty(s_embedding, return_components=True)
+                    mean_terms.append(iso_aux["mean_term"])
+                    cov_terms.append(iso_aux["cov_term"])
+                else:
+                    l_iso, iso_aux = cov_iso_penalty(s_embedding)
                 cov_iso_losses.append(l_iso)
                 cov_iso_mean_terms.append(iso_aux["L_iso_mean"])
                 cov_iso_cov_terms.append(iso_aux["L_iso_cov"])
 
         loss, aux = dino_loss(t_logits, student_logits, teacher_temp, student_temp)
         total_loss = loss
+        lambda_mean, lambda_cov = resolve_coviso_weights(cfg["loss"], step, max_steps)
+        coviso_contribution = None
         if velocity_head is not None:
             l_vel = torch.stack(vel_losses).mean()
             total_loss = total_loss + cfg["loss"]["velocity_lambda"] * l_vel
@@ -394,7 +443,8 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             aux["L_koleo"] = l_koleo.detach()
         if cov_iso_losses and step >= cov_iso_start_step:
             l_iso_total = torch.stack(cov_iso_losses).mean()
-            total_loss = total_loss + cov_iso_lambda * l_iso_total
+            coviso_contribution = combine_coviso(cov_iso_losses, mean_terms, cov_terms, lambda_mean, lambda_cov)
+            total_loss = total_loss + coviso_contribution
             aux["L_iso"] = l_iso_total.detach()
             aux["L_iso_mean"] = torch.stack(cov_iso_mean_terms).mean()
             aux["L_iso_cov"] = torch.stack(cov_iso_cov_terms).mean()
@@ -408,9 +458,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                     tbin_counts[b] += 1
 
         grad_norm_log = {}
+        if step in gradient_steps:
+            parameters = [p for p in student.backbone.parameters() if p.requires_grad]
+            grad_norm_log["grad_dino_backbone"] = backbone_grad_norm(loss, parameters)
+            for name, terms, weight in (("mean", mean_terms, lambda_mean), ("cov", cov_terms, lambda_cov)):
+                grad_norm_log[f"grad_{name}_backbone"] = (backbone_grad_norm(weight * torch.stack(terms).mean(), parameters)
+                                                         if terms and step >= cov_iso_start_step else 0.0)
         if diag_coviso_grad_split and cov_iso_losses and step >= cov_iso_start_step:
             optimizer.zero_grad()
-            (cov_iso_lambda * l_iso_total).backward(retain_graph=True)
+            coviso_contribution.backward(retain_graph=True)
             grad_norm_log["diag_grad_norm_coviso_only_backbone"] = torch.nn.utils.clip_grad_norm_(
                 list(student.backbone.parameters()), max_norm=1e10
             ).item()
@@ -432,9 +488,11 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
 
         if grad_clip is not None:
             grad_norm_log["grad_norm_total"] = torch.nn.utils.clip_grad_norm_(
-                all_trainable_params, max_norm=grad_clip
+                all_trainable_params, max_norm=grad_clip, error_if_nonfinite=record_components
             ).item()
 
+        if record_components and not torch.isfinite(total_loss):
+            raise FloatingPointError(f"nonfinite loss at step {step}")
         optimizer.step()
         scheduler.step()
         if momentum_start is not None:
@@ -442,7 +500,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                                                          momentum_ramp_steps, momentum_shape)
         teacher.update(student)
 
-        if step % log_every == 0 or step == max_steps - 1:
+        if step % log_every == 0 or step == steps_to_run - 1:
             with torch.no_grad():
                 b_kl = batch_kl_diagnostic(student_logits, student_temp, n_pairs=n_pairs)
             log = {
@@ -471,6 +529,15 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             if momentum_start is not None:
                 log["teacher_momentum"] = teacher.momentum
             log.update(grad_norm_log)
+            if record_components:
+                l_mean = torch.stack(cov_iso_mean_terms).mean().item() if cov_iso_mean_terms else 0.0
+                l_cov = torch.stack(cov_iso_cov_terms).mean().item() if cov_iso_cov_terms else 0.0
+                active = step >= cov_iso_start_step
+                log.update(L_DINO=loss.item(), L_mean=l_mean, L_cov=l_cov,
+                           lambda_mean=lambda_mean, lambda_cov=lambda_cov,
+                           weighted_mean=lambda_mean * l_mean if active else 0.0,
+                           weighted_cov=lambda_cov * l_cov if active else 0.0)
+                append_record(run_dir / "components.jsonl", {"loop_step": step, "optimizer_steps": step + 1, **log})
 
             if diag_tbin_kl:
                 for b in range(n_tbins):
@@ -496,7 +563,7 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
                 break
 
         do_dense_eval = dense_early_eval and step <= 300 and step % 25 == 0
-        if step % eval_every == 0 or step == max_steps - 1 or do_dense_eval:
+        if step % eval_every == 0 or step == steps_to_run - 1 or do_dense_eval:
             space_metrics = sts_b_dev_metrics_by_space(student, tokenizer, device, eval_spaces)
             sts, alignment, uniformity = space_metrics["embedding"]
             eff_rank, max_sv = effective_rank_metrics(student, tokenizer, rank_eval_sentences, device)
@@ -535,25 +602,48 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
             for k, v in eval_log.items():
                 tb_writer.add_scalar(f"eval/{k}", v, step)
             logger.info(eval_msg)
+            if record_components:
+                append_record(run_dir / "evaluations.jsonl", {"loop_step": step, "optimizer_steps": step + 1,
+                              "sts_b_dev": sts, "alignment": alignment, "uniformity": uniformity,
+                              "eff_rank": eff_rank, "max_sv_ratio": max_sv})
             reason = guard.observe_rank(step, eff_rank)
             if reason:
                 logger.info(f"[step {step}] COLLAPSE ABORT {reason} last_ok_eval_step={last_ok_eval_step}")
                 collapsed = True
                 break
             last_ok_eval_step = step
+            if sts > best_sts:
+                best_sts, best_step = sts, step
+                if cfg["eval"].get("save_best", False):
+                    save_checkpoint(ROOT / "checkpoints" / cfg["run_name"] / "best.pt", cfg, student, teacher,
+                                    cov_iso_penalty, step, sts, best_step, best_sts)
+
+        if record_components and step in gradient_steps and step % log_every != 0 and step != steps_to_run - 1:
+            append_record(run_dir / "gradient_diagnostics.jsonl", {"loop_step": step, **grad_norm_log})
 
     if cfg["train"].get("save_checkpoint", True):
         ckpt_path = ROOT / "checkpoints" / cfg["run_name"] / "last.pt"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
+        checkpoint = {
             "state_dict": student.state_dict(),
             "model_cfg": cfg["model"],
             "teacher_state_dict": teacher.model.state_dict(),
             "train_status": "collapsed" if collapsed else "complete",
             "last_ok_eval_step": last_ok_eval_step,
             "train_cfg": cfg["train"],
-        }, ckpt_path)
+            "loop_step": step, "sts_b_dev": sts, "best_step": best_step, "best_sts": best_sts,
+        }
+        if record_components:
+            checkpoint["loss_cfg"] = cfg["loss"]
+            if cov_iso_penalty is not None:
+                checkpoint["cov_iso_state_dict"] = cov_iso_penalty.state_dict()
+        torch.save(checkpoint, ckpt_path)
         logger.info(f"[train] saved checkpoint -> {ckpt_path}")
+    if record_components:
+        status = "collapsed" if collapsed else ("smoke_complete" if steps_to_run < max_steps else "complete")
+        (run_dir / "completion.json").write_text(json.dumps({"status": status,
+             "completed_steps": step + 1, "best_sts": best_sts, "best_loop_step": best_step,
+             "last_sts": sts, "last_loop_step": last_ok_eval_step}, indent=2) + "\n")
 
     opt = cfg.get("_optuna")
     if opt:
@@ -566,6 +656,16 @@ def _run(cfg, device, max_steps, logger, tb_writer) -> None:
         )
 
     wandb.finish()
+
+
+def save_checkpoint(path, cfg, student, teacher, penalty, step, sts, best_step, best_sts):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {"state_dict": student.state_dict(), "teacher_state_dict": teacher.model.state_dict(),
+                  "model_cfg": cfg["model"], "train_cfg": cfg["train"], "loss_cfg": cfg["loss"],
+                  "loop_step": step, "sts_b_dev": sts, "best_step": best_step, "best_sts": best_sts}
+    if penalty is not None:
+        checkpoint["cov_iso_state_dict"] = penalty.state_dict()
+    torch.save(checkpoint, path)
 
 
 if __name__ == "__main__":
