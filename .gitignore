@@ -15,8 +15,9 @@ wandb/
 
 # 프로젝트 지시문/방법 스펙은 저장소에서 함께 관리한다.
 
-# 참고자료 (개인 문서/대용량 중첩 git 저장소, 코드와 무관 - 레포에 불필요)
+# 개발 참고용 개인 보고서는 로컬에만 보관한다.
 referecne_files/
+reference_files/
 
 # 세션 부산물
 *.ipynb_checkpoints/
