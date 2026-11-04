@@ -53,9 +53,7 @@ def encode_sentences(
             )
             representations = {"embedding": output.embedding}
             if "bottleneck" in spaces:
-                representations["bottleneck"] = F.normalize(
-                    model.head.mlp(output.pooled), p=2, dim=-1
-                )
+                representations["bottleneck"] = output.bottleneck
             if "head" in spaces:
                 representations["head"] = F.normalize(output.logits, p=2, dim=-1)
             for space in spaces:
@@ -130,18 +128,28 @@ def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, m
     return rank, probabilities[0].item()
 
 
-def sts_suite_spearman(model, tokenizer, device, batch_size=64, max_length=128):
+def sts_suite_by_space(
+    model, tokenizer, device, batch_size=64, max_length=128, spaces=("embedding", "bottleneck")
+):
     """Evaluate test splits only after the dev-only candidate selection is frozen."""
-    result = {}
+    result = {space: {} for space in spaces}
     for task, dataset in STS_SUITE.items():
         ds = load_dataset(dataset, split="test")
         e1 = encode_sentences(
-            model, tokenizer, list(ds["sentence1"]), device, batch_size, max_length
-        )["embedding"]
+            model, tokenizer, list(ds["sentence1"]), device, batch_size, max_length, spaces=spaces
+        )
         e2 = encode_sentences(
-            model, tokenizer, list(ds["sentence2"]), device, batch_size, max_length
-        )["embedding"]
-        cosines = F.cosine_similarity(e1, e2, dim=-1).numpy()
-        result[task] = float(spearmanr(cosines, list(ds["score"]))[0])
-    result["avg_7task"] = sum(result.values()) / len(result)
+            model, tokenizer, list(ds["sentence2"]), device, batch_size, max_length, spaces=spaces
+        )
+        for space in spaces:
+            cosines = F.cosine_similarity(e1[space], e2[space], dim=-1).numpy()
+            result[space][task] = float(spearmanr(cosines, list(ds["score"]))[0])
+    for scores in result.values():
+        scores["avg_7task"] = sum(scores.values()) / len(scores)
     return result
+
+
+def sts_suite_spearman(model, tokenizer, device, batch_size=64, max_length=128):
+    return sts_suite_by_space(
+        model, tokenizer, device, batch_size, max_length, spaces=("embedding",)
+    )["embedding"]

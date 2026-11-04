@@ -4,10 +4,12 @@ Run through scripts/gpu_guard.py; see configs/coviso_relax/base.yaml.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
 import random
+import struct
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,7 +23,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from src.augment import FlowNoiseAug
 from src.evaluate import EVAL_SPACES, effective_rank_metrics, sts_b_dev_metrics_by_space
 from src.loss import DINOObjective, LossTerms, backbone_grad_norm, batch_kl_diagnostic
-from src.model import DinoTextModel, EMATeacher
+from src.model import DinoTextModel, EMATeacher, ModelOutput
 from src.provenance import append_record, record_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +125,14 @@ class TrainingStep:
     teacher_temp: float
 
 
+@dataclass
+class EncodedViews:
+    teacher: ModelOutput
+    student_embeddings: tuple[torch.Tensor, ...]
+    student_logits: list[torch.Tensor]
+    student_bottlenecks: tuple[torch.Tensor, ...]
+
+
 class Trainer:
     """Training computation, optimization, and evaluation have separate methods."""
 
@@ -180,7 +190,8 @@ class Trainer:
         self.gradient_steps = set(train["component_grad_steps"])
         self.best_sts, self.best_step = -float("inf"), -1
 
-    def training_step(self, sentences, step) -> TrainingStep:
+    def forward_views(self, sentences, step) -> EncodedViews:
+        """No optimizer, center, covariance, or teacher EMA updates here."""
         enc = self.tokenizer(
             sentences,
             truncation=True,
@@ -202,10 +213,15 @@ class Trainer:
             inputs_embeds=torch.cat(views.student_embeds, dim=0),
             attention_mask=torch.cat([mask] * count, dim=0),
         )
-        embeddings, logits = (
+        return EncodedViews(
+            teacher,
             student.embedding.chunk(count, dim=0),
             list(student.logits.chunk(count, dim=0)),
+            student.bottleneck.chunk(count, dim=0),
         )
+
+    def training_step(self, sentences, step) -> TrainingStep:
+        views = self.forward_views(sentences, step)
         loss_cfg = self.cfg["loss"]
         temperature = cosine_ramp(
             step,
@@ -213,8 +229,16 @@ class Trainer:
             loss_cfg["teacher_temp"],
             self.temp_steps,
         )
-        losses = self.objective(teacher.logits, embeddings, logits, step, temperature)
-        return TrainingStep(losses, logits, temperature)
+        losses = self.objective(
+            views.teacher.logits,
+            views.student_embeddings,
+            views.student_logits,
+            step,
+            temperature,
+            teacher_bottleneck=views.teacher.bottleneck,
+            student_bottlenecks=views.student_bottlenecks,
+        )
+        return TrainingStep(losses, views.student_logits, temperature)
 
     def optimize(self, result, step):
         losses, diagnostics = result.losses, {}
@@ -228,6 +252,12 @@ class Trainer:
                         parameters,
                     )
                     if losses.active
+                    else 0.0
+                )
+            if losses.bneck is not None:
+                diagnostics["grad_bneck_backbone"] = (
+                    backbone_grad_norm(losses.lambda_bneck * losses.bneck, parameters)
+                    if losses.lambda_bneck > 0
                     else 0.0
                 )
         self.optimizer.zero_grad()
@@ -303,6 +333,7 @@ class Trainer:
                 "uniformity": final.uniformity,
                 "eff_rank": rank,
                 "max_sv_ratio": max_sv,
+                "sts_b_dev_bottleneck": metrics["bottleneck"].spearman,
             },
         )
         if final.spearman > self.best_sts:
@@ -334,8 +365,15 @@ class Trainer:
         steps = min(train["max_steps"], train.get("stop_after_steps", train["max_steps"]))
         sampler = BatchIndexSampler(len(self.sentences), train["batch_size"])
         self.student.train()
+        order = hashlib.sha256() if train.get("record_batch_order", False) else None
+        first_indices = None
         for step in range(steps):
-            result = self.training_step([self.sentences[i] for i in sampler.next()], step)
+            indices = sampler.next()
+            if order is not None:
+                order.update(struct.pack(f"<{len(indices)}I", *indices))
+                if first_indices is None:
+                    first_indices = indices
+            result = self.training_step([self.sentences[i] for i in indices], step)
             gradients = self.optimize(result, step)
             logging_step = step % evaluation["log_every_steps"] == 0 or step == steps - 1
             if logging_step:
@@ -348,6 +386,21 @@ class Trainer:
                     {"loop_step": step, **gradients},
                 )
         self.save_checkpoint("last", step, sts)
+        if order is not None:
+            (self.run_dir / "batch_order.json").write_text(
+                json.dumps(
+                    {
+                        "sha256": order.hexdigest(),
+                        "first_indices": first_indices,
+                        "steps": steps,
+                        "batch_size": train["batch_size"],
+                        "seed": self.cfg["seed"],
+                        "encoding": "ordered little-endian uint32 indices",
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
         (self.run_dir / "completion.json").write_text(
             json.dumps(
                 {

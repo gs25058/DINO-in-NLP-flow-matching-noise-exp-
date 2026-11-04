@@ -1,0 +1,476 @@
+"""Paired 20×4000 Optuna, fresh 3-seed confirmations, fixed aux-off, then STS7."""
+
+import argparse
+import copy
+import os
+import random
+import signal
+import sys
+import time
+from pathlib import Path
+
+import optuna
+import torch
+import yaml
+from optuna.trial import TrialState
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.report_bottleneck import render
+from scripts.run_coviso_optuna import Children, complete_record, parallel_jobs, top_trials
+from src.bottleneck import (
+    ARMS,
+    CONFIRM_SEEDS,
+    SAMPLER_SEED,
+    SEARCH_SEED,
+    anchor_parameters,
+    calibrate,
+    common_space,
+    trial_config,
+)
+from src.provenance import prepare, read_json, sha256_file, verify_source, write_json
+from src.train import Trainer, load_config, setup_logger
+
+
+def set_stage(campaign, stage, **extra):
+    write_json(campaign / "state.json", {"stage": stage, "updated_unix": time.time(), **extra})
+    render(campaign)
+
+
+def save_config(campaign, manifest, base, label, seed):
+    cfg = copy.deepcopy(base)
+    cfg.update(seed=seed, run_name=f"bneckcos_{campaign.name}_{label}_s{seed}")
+    for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
+        cfg["data"][key] = str(Path(manifest["workspace"]) / cfg["data"][key])
+    cfg["experiment"] = {
+        "source_manifest": str(campaign / "source_manifest.json"),
+        "protocol": "bottleneck_cosine",
+        "label": label,
+        "fresh_pretrained_start": True,
+        "spec_sha256": manifest["spec_sha256"],
+    }
+    path = campaign / "configs" / f"{label}_s{seed}.yaml"
+    if path.exists() and read_yaml(path) != cfg:
+        raise RuntimeError(f"preserving changed config: {path}")
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return path, cfg
+
+
+def read_yaml(path):
+    return yaml.safe_load(path.read_text())
+
+
+def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=False):
+    path, cfg = save_config(campaign, manifest, base, label, seed)
+    log = campaign / "results/logs" / cfg["run_name"]
+    completion = log / "completion.json"
+    if not completion.exists():
+        verify_source(campaign, manifest)
+        command = [sys.executable, "-m", "src.train", "--config", str(path), "--device", "cuda"]
+        if smoke:
+            command += ["--stop-after-steps", "60"]
+        cal = read_json(campaign / "calibration.json")
+        children.run(
+            gpu,
+            f"train_{label}_s{seed}",
+            command,
+            evaluation_path=log / "evaluations.jsonl",
+            expected_initialization=cal["initial_student_sha256"] if seed == SEARCH_SEED else None,
+        )
+    metrics = read_json(completion) if smoke else complete_record(completion)
+    if smoke and (metrics["status"] != "smoke_complete" or metrics["completed_steps"] != 60):
+        raise RuntimeError("60-step smoke incomplete")
+    provenance = read_json(log / "provenance.json")
+    order = read_json(log / "batch_order.json")
+    return {
+        "run_name": cfg["run_name"],
+        "config": str(path),
+        "metrics": metrics,
+        "seed": seed,
+        "label": label,
+        "initial_student_sha256": provenance["initial_student_sha256"],
+        "batch_order": order,
+        "data": provenance["data"],
+    }
+
+
+def audit_runs(campaign, runs, calibration):
+    hashes = {}
+    orders = {}
+    data = None
+    for run in runs:
+        seed = run["seed"]
+        fingerprint = run["initial_student_sha256"]
+        order = run["batch_order"]["sha256"]
+        if hashes.setdefault(seed, fingerprint) != fingerprint:
+            raise RuntimeError("unequal pretrained initialization within seed")
+        if orders.setdefault(seed, order) != order:
+            raise RuntimeError("unequal data order within seed")
+        identities = {k: v["sha256"] for k, v in run["data"].items()}
+        if data is None:
+            data = identities
+        if data != identities:
+            raise RuntimeError("training data changed between runs")
+        if (
+            seed == SEARCH_SEED
+            and run["batch_order"]["first_indices"] != calibration["first_indices"]
+        ):
+            raise RuntimeError("calibration minibatch differs from training")
+    write_json(
+        campaign / "comparability_audit.json",
+        {
+            "same_initialization_per_seed": True,
+            "same_data_order_per_seed": True,
+            "initial_sha256": hashes,
+            "batch_order_sha256": orders,
+            "data_sha256": data,
+        },
+    )
+
+
+def search(campaign, manifest, base, calibration, children):
+    studies = {}
+    all_runs = []
+    for arm in ARMS:
+        study = optuna.create_study(
+            storage=f"sqlite:///{campaign / f'{arm}.db'}",
+            study_name=f"{campaign.name}_{arm}",
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(
+                seed=SAMPLER_SEED, n_startup_trials=5, multivariate=True
+            ),
+            pruner=optuna.pruners.NopPruner(),
+            load_if_exists=True,
+        )
+        if study.trials:
+            raise RuntimeError("existing study preserved; no silent sampler restart")
+        study.enqueue_trial(anchor_parameters(base, arm, calibration))
+        studies[arm] = study
+    for number in range(manifest["trials_per_arm"]):
+        pending = {}
+        for arm in ARMS:
+            trial = studies[arm].ask()
+            pending[arm] = (trial, trial_config(trial, base, arm, calibration))
+
+        def execute(gpu, arm):
+            trial, cfg = pending[arm]
+            return execute_train(
+                campaign, manifest, children, gpu, cfg, f"search_{arm}_t{trial.number}", SEARCH_SEED
+            )
+
+        def completed(arm, run):
+            trial, _ = pending[arm]
+            trial.set_user_attr("run", run)
+            studies[arm].tell(trial, run["metrics"]["best_sts"])
+            all_runs.append(run)
+            audit_runs(campaign, all_runs, calibration)
+            counts = {
+                name: sum(t.state == TrialState.COMPLETE for t in study.trials)
+                for name, study in studies.items()
+            }
+            set_stage(
+                campaign, "search", completed_pairs=min(counts.values()), completed_by_arm=counts
+            )
+
+        try:
+            parallel_jobs(ARMS, manifest["gpus"], children, execute, completed)
+        except BaseException:
+            for arm, (trial, _) in pending.items():
+                if studies[arm].trials[trial.number].state == TrialState.RUNNING:
+                    studies[arm].tell(trial, state=TrialState.FAIL)
+            raise
+    return studies, all_runs
+
+
+def confirm(campaign, manifest, studies, children, calibration):
+    shortlist = {arm: [t.number for t in top_trials(studies[arm])] for arm in ARMS}
+    if any(len(ids) != 3 for ids in shortlist.values()):
+        raise RuntimeError("three completed candidates required per arm")
+    write_json(
+        campaign / "shortlist.json",
+        {"trials": shortlist, "new_seeds": CONFIRM_SEEDS, "test_scores_seen": False},
+    )
+    confirmed = {arm: {str(n): {} for n in shortlist[arm]} for arm in ARMS}
+    jobs = [(arm, n, seed) for arm in ARMS for n in shortlist[arm] for seed in CONFIRM_SEEDS]
+
+    def execute(gpu, job):
+        arm, n, seed = job
+        parent = load_config(studies[arm].trials[n].user_attrs["run"]["config"])
+        return execute_train(campaign, manifest, children, gpu, parent, f"confirm_{arm}_t{n}", seed)
+
+    def completed(job, run):
+        arm, n, seed = job
+        confirmed[arm][str(n)][str(seed)] = run
+        write_json(campaign / "confirmations.json", confirmed)
+        set_stage(campaign, "confirmation")
+
+    parallel_jobs(jobs, manifest["gpus"], children, execute, completed)
+    selected = {
+        arm: min(
+            shortlist[arm],
+            key=lambda n: (
+                -sum(confirmed[arm][str(n)][str(s)]["metrics"]["best_sts"] for s in CONFIRM_SEEDS)
+                / len(CONFIRM_SEEDS),
+                n,
+            ),
+        )
+        for arm in ARMS
+    }
+    selection = {
+        "selected_trials": selected,
+        "selection_frozen_unix": time.time(),
+        "test_scores_seen": False,
+        "selection_metric": "mean 768d STS-B dev best over seeds101,102,103",
+        "selected_params": {arm: studies[arm].trials[n].params for arm, n in selected.items()},
+    }
+    write_json(campaign / "selection.json", selection)
+    groups = {arm: confirmed[arm][str(n)] for arm, n in selected.items()}
+    write_json(campaign / "final_runs.json", groups)
+    return groups, [
+        r
+        for candidates in confirmed.values()
+        for seeds in candidates.values()
+        for r in seeds.values()
+    ]
+
+
+def ablate(campaign, manifest, groups, children):
+    off = load_config(groups["bottleneck"][str(CONFIRM_SEEDS[0])]["config"])
+    off["loss"]["bneck_cosine_lambda"] = 0.0
+    results = {}
+    parallel_jobs(
+        CONFIRM_SEEDS,
+        manifest["gpus"],
+        children,
+        lambda gpu, seed: execute_train(campaign, manifest, children, gpu, off, "aux_off", seed),
+        lambda seed, run: results.update({str(seed): run}),
+    )
+    groups["aux_off"] = results
+    write_json(campaign / "final_runs.json", groups)
+    for seed in CONFIRM_SEEDS:
+        original = load_config(groups["bottleneck"][str(seed)]["config"])
+        changed = load_config(results[str(seed)]["config"])
+        for cfg in (original, changed):
+            cfg.pop("run_name")
+            cfg.pop("experiment")
+            cfg["loss"].pop("bneck_cosine_lambda")
+        if original != changed:
+            raise RuntimeError("aux-off changed another hyperparameter")
+    return list(results.values())
+
+
+def evaluate(campaign, manifest, groups, children):
+    if not (campaign / "selection.json").exists():
+        raise RuntimeError("test requires frozen selection")
+    jobs = [
+        (group, seed, which)
+        for group in groups
+        for seed in CONFIRM_SEEDS
+        for which in ("best", "last")
+    ]
+
+    def execute(gpu, job):
+        group, seed, which = job
+        run = groups[group][str(seed)]
+        output = campaign / "results/analysis" / f"{group}_s{seed}_{which}.json"
+        children.run(
+            gpu,
+            f"eval_{group}_s{seed}_{which}",
+            [
+                sys.executable,
+                "scripts/eval_sts7.py",
+                "--runs",
+                run["run_name"],
+                "--which",
+                which,
+                "--device",
+                "cuda",
+                "--tf32",
+                "--diagnose-bottleneck",
+                "--out",
+                str(output),
+            ],
+        )
+        result = read_json(output)
+        if (
+            run["run_name"] not in result["runs"]
+            or run["run_name"] not in result["bottleneck_diagnostic"]
+        ):
+            raise RuntimeError("missing requested primary or diagnostic test scores")
+        result["experiment"] = {
+            "group": group,
+            "seed": seed,
+            "which": which,
+            "selection_frozen_before_test": True,
+        }
+        write_json(output, result)
+
+    parallel_jobs(jobs, manifest["gpus"], children, execute, lambda *_: render(campaign))
+
+
+def run(campaign, manifest):
+    env = dict(
+        os.environ,
+        HF_HUB_OFFLINE="1",
+        HF_DATASETS_OFFLINE="1",
+        HF_HOME=os.environ.get("HF_HOME", "/src/gs25058/scratch/.hf_home"),
+        PYTHONPATH=str(campaign / "source"),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    children = Children(campaign, env)
+    signal.signal(signal.SIGTERM, children.stop)
+    signal.signal(signal.SIGINT, children.stop)
+    base = load_config(campaign / "source/configs/bottleneck_cosine/base.yaml")
+    stage = "calibration"
+    try:
+        set_stage(campaign, stage)
+        path, _ = save_config(campaign, manifest, base, "calibration", SEARCH_SEED)
+        children.run(
+            manifest["gpus"][0],
+            "calibration",
+            [
+                sys.executable,
+                "scripts/run_bottleneck.py",
+                "--campaign",
+                str(campaign),
+                "--calibration-child",
+                "--config",
+                str(path),
+            ],
+        )
+        calibration = read_json(campaign / "calibration.json")
+        write_json(
+            campaign / "search_registration.json",
+            {
+                "registered_before_training_unix": time.time(),
+                "common_space": common_space(base),
+                "lambda_range": calibration["lambda_range"],
+                "lambda_anchor": calibration["lambda_anchor"],
+                "trials_per_arm": manifest["trials_per_arm"],
+                "steps": 4000,
+                "pruning": "none",
+                "search_seed": SEARCH_SEED,
+                "confirm_seeds": CONFIRM_SEEDS,
+                "calibration_sha256": sha256_file(campaign / "calibration.json"),
+                "spec_sha256": manifest["spec_sha256"],
+            },
+        )
+        stage = "smoke"
+        set_stage(campaign, stage)
+
+        def smoke(gpu, arm):
+            cfg = copy.deepcopy(base)
+            cfg["loss"]["bneck_cosine_lambda"] = (
+                calibration["lambda_anchor"] if arm == "bottleneck" else 0.0
+            )
+            return execute_train(
+                campaign, manifest, children, gpu, cfg, f"smoke_{arm}", SEARCH_SEED, smoke=True
+            )
+
+        smoked = {}
+        parallel_jobs(
+            ARMS,
+            manifest["gpus"],
+            children,
+            smoke,
+            lambda arm, result: smoked.update({arm: result}),
+        )
+        audit_runs(campaign, list(smoked.values()), calibration)
+        write_json(campaign / "smoke.json", smoked)
+        stage = "search"
+        set_stage(campaign, stage)
+        studies, runs = search(campaign, manifest, base, calibration, children)
+        stage = "confirmation"
+        set_stage(campaign, stage)
+        groups, confirmed = confirm(campaign, manifest, studies, children, calibration)
+        stage = "aux_off"
+        set_stage(campaign, stage)
+        off = ablate(campaign, manifest, groups, children)
+        audit_runs(campaign, runs + confirmed + off, calibration)
+        stage = "test_evaluation"
+        set_stage(campaign, stage)
+        evaluate(campaign, manifest, groups, children)
+        set_stage(campaign, "complete")
+    except BaseException as exc:
+        children.stop()
+        set_stage(campaign, "failed", failed_stage=stage, error=str(exc))
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--campaign", type=Path, required=True)
+    parser.add_argument("--gpus", default="auto,auto")
+    parser.add_argument("--trials-per-arm", type=int, default=20)
+    parser.add_argument("--budget-reason", default="")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--calibration-child", action="store_true")
+    parser.add_argument("--config", type=Path)
+    args = parser.parse_args()
+    campaign = args.campaign.resolve()
+    if args.calibration_child:
+        cfg = load_config(args.config)
+        torch.manual_seed(cfg["seed"])
+        random.seed(cfg["seed"])
+
+        class Writer:
+            def add_scalar(self, *args):
+                pass
+
+        trainer = Trainer(
+            cfg,
+            "cuda",
+            setup_logger(campaign / "results/logs" / cfg["run_name"]),
+            Writer(),
+            root=campaign / "source",
+        )
+        write_json(campaign / "calibration.json", calibrate(trainer))
+        return
+    if args.execute:
+        manifest = read_json(campaign / "source_manifest.json")
+        verify_source(campaign, manifest)
+        if sha256_file(campaign / "OPTUNA_SPEC.md") != manifest["spec_sha256"]:
+            raise RuntimeError("changed preregistration")
+        run(campaign, manifest)
+        return
+    gpus = args.gpus.split(",")
+    if len(gpus) not in (1, 2) or (len(set(gpus)) != len(gpus) and gpus != ["auto", "auto"]):
+        parser.error("one/two distinct GPU indices or auto/auto,auto required")
+    if "auto" in gpus and any(g != "auto" for g in gpus):
+        parser.error("do not mix explicit and automatic GPU selection")
+    if not 3 <= args.trials_per_arm <= 20:
+        parser.error("3–20 trials per arm required")
+    if args.trials_per_arm != 20 and not args.budget_reason.strip():
+        parser.error("reduced equal budget requires a reason before starting")
+    manifest = prepare(
+        campaign,
+        ROOT,
+        gpus,
+        ROOT / "docs/experiments/bottleneck_cosine/report.md",
+        experiment_dir="bottleneck_cosine",
+    )
+    base = load_config(ROOT / "configs/bottleneck_cosine/base.yaml")
+    manifest.update(
+        trials_per_arm=args.trials_per_arm,
+        budget_reason=args.budget_reason,
+        common_space=common_space(base),
+        launch_argv=sys.argv,
+        initial_workspace_branch="exp/bottleneck-cosine-paired-optuna",
+    )
+    write_json(campaign / "source_manifest.json", manifest)
+    if not args.prepare_only:
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                str(campaign / "source/scripts/run_bottleneck.py"),
+                "--campaign",
+                str(campaign),
+                "--execute",
+            ],
+        )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,10 @@
 # 현재 브랜치 작업 지침
 
-이 브랜치는 BERT flow-noise DINO의 19축 공동 Optuna 실험만 지원한다.
-방법은 [METHOD.md](METHOD.md), 예산·선택 규칙은
-[OPTUNA_SPEC.md](docs/experiments/coviso_relax/OPTUNA_SPEC.md)를 따른다.
+이 브랜치의 현재 실험은 BERT flow-noise DINO의 256d bottleneck cosine 보조항이다.
+새 예산·보정·선택 규칙은 [bottleneck 명세](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)를 따른다.
+기존 19축 공동 Optuna 실험 코드·결과·미커밋 보고서와 선택 config는 보존한다.
+기준 방법은 [METHOD.md](METHOD.md), 이전 실험 명세는
+[OPTUNA_SPEC.md](docs/experiments/coviso_relax/OPTUNA_SPEC.md)에 있다.
 
 - 조건 차이는 config 값으로 표현한다. 별도 학습 루프나 과거 실험 호환 코드를 추가하지 않는다.
 - 노이즈 생성과 마스킹은 `src/augment.py`에서 처리하고 `inputs_embeds`로 주입한다.

@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.evaluate import sts_suite_spearman  # noqa: E402
+from src.evaluate import sts_suite_by_space  # noqa: E402
 from src.model import DinoTextModel  # noqa: E402
 
 
@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--which", choices=("best", "last"), default="last")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--tf32", action="store_true")
+    parser.add_argument("--diagnose-bottleneck", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.tf32:
@@ -37,7 +38,7 @@ def main():
             parser.error("TF32 evaluation requires an Ampere-or-newer CUDA device")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    rows, metadata = {}, {}
+    rows, metadata, bottlenecks = {}, {}, {}
     for run in args.runs:
         checkpoint = torch.load(
             ROOT / "checkpoints" / run / f"{args.which}.pt",
@@ -47,7 +48,11 @@ def main():
         model = load_eval_model(checkpoint, args.device)
         backbone = checkpoint["model_cfg"]["backbone"]
         tokenizer = AutoTokenizer.from_pretrained(backbone)
-        rows[run] = sts_suite_spearman(model, tokenizer, args.device)
+        spaces = ("embedding", "bottleneck") if args.diagnose_bottleneck else ("embedding",)
+        scores = sts_suite_by_space(model, tokenizer, args.device, spaces=spaces)
+        rows[run] = scores["embedding"]
+        if args.diagnose_bottleneck:
+            bottlenecks[run] = scores["bottleneck"]
         metadata[run] = {
             "backbone": backbone,
             "pooling": "mean+l2",
@@ -67,6 +72,7 @@ def main():
                 "entity": "student",
                 "runs": rows,
                 "metadata": metadata,
+                "bottleneck_diagnostic": bottlenecks,
             },
             indent=2,
         )

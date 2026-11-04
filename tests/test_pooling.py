@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.model import DinoTextModel, EMATeacher, masked_mean_pool
+from src.model import DINOHead, DinoTextModel, EMATeacher, masked_mean_pool
 
 
 class Backbone(nn.Module):
@@ -16,14 +16,14 @@ def test_forward_exposes_named_mean_pool_and_logits_and_ignores_padding():
     model = DinoTextModel.__new__(DinoTextModel)
     nn.Module.__init__(model)
     model.backbone = Backbone()
-    model.head = nn.Linear(4, 8)
+    model.head = DINOHead(4, 3, 8)
     inputs = torch.randn(2, 5, 4)
     mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
     output = model(inputs, mask)
     expected = masked_mean_pool(inputs * 2, mask)
     torch.testing.assert_close(output.pooled, expected, rtol=0, atol=0)
     torch.testing.assert_close(output.embedding, F.normalize(expected, p=2, dim=-1), rtol=0, atol=0)
-    torch.testing.assert_close(output.logits, model.head(expected), rtol=0, atol=0)
+    torch.testing.assert_close(output.logits, model.head(expected).logits, rtol=0, atol=0)
     changed = inputs.clone()
     changed[0, 3:] = 10000
     assert torch.equal(model(changed, mask).embedding, output.embedding)

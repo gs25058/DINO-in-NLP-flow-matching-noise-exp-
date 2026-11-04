@@ -25,7 +25,8 @@ class Model(torch.nn.Module):
     def forward(self, inputs_embeds, attention_mask):
         self.n_forward += 1
         pooled = inputs_embeds.mean(dim=1)
-        return ModelOutput(F.normalize(pooled, p=2, dim=-1), self.head(pooled), pooled)
+        head = self.head(pooled)
+        return ModelOutput(F.normalize(pooled, p=2, dim=-1), head.logits, pooled, head.bottleneck)
 
 
 class Enc(dict):
@@ -60,7 +61,7 @@ def test_all_spaces_share_one_backbone_pass_and_are_normalized():
     enc = tok(SENTENCES)
     pooled = model.embedding(enc["input_ids"]).mean(1)
     assert torch.equal(out["bottleneck"], F.normalize(model.head.mlp(pooled), p=2, dim=-1))
-    assert torch.equal(out["head"], F.normalize(model.head(pooled), p=2, dim=-1))
+    assert torch.equal(out["head"], F.normalize(model.head(pooled).logits, p=2, dim=-1))
 
 
 def test_unknown_space_raises_before_a_forward_and_restores_mode_on_error():

@@ -46,8 +46,9 @@ def digest(tensors):
     REFERENCE["cases"],
     ids=[f"{r['name']}_s{r['seed']}" for r in REFERENCE["cases"]],
 )
+@pytest.mark.parametrize("explicit_zero", [False, True])
 def test_full_training_preserves_outputs_gradients_ema_checkpoints_and_rng(
-    case, tmp_path, monkeypatch
+    case, tmp_path, monkeypatch, explicit_zero
 ):
     """Four 60-step CPU validation runs; no pretrained downloads or STS test scores."""
     previous_threads = torch.get_num_threads()
@@ -87,6 +88,9 @@ def test_full_training_preserves_outputs_gradients_ema_checkpoints_and_rng(
     cfg = config_from_parameters(
         train.load_config("configs/coviso_relax/control.yaml"), case["params"]
     )
+    if explicit_zero:
+        cfg["loss"]["bneck_cosine_lambda"] = 0.0
+        cfg["train"]["record_batch_order"] = True
     cfg.update(
         seed=case["seed"],
         run_name=f"{case['name']}_{case['seed']}",

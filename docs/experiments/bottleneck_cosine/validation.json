@@ -1,0 +1,10 @@
+{
+  "before_tests": 59,
+  "after_tests": 71,
+  "zero_and_missing_setting": "2 settings x2 seeds x60 CPU tiny-BERT steps, bit-identical outputs/gradients/student/teacher/covariance/RNG to preexisting fixture",
+  "calibration_state_preservation": "unit-tested optimizer/scheduler/criterion/teacher/model/.grad and Python/Torch RNG",
+  "pipeline": "synthetic child integration: equal 3-per-arm unit budget, 18 confirmations,3 aux_off,18 dual-space test jobs; no real scores",
+  "gpu_smoke": "not run yet",
+  "gpu_experiment": "not run yet",
+  "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q"
+}

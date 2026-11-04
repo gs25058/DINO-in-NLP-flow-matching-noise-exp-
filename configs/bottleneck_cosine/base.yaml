@@ -1,0 +1,6 @@
+extends: ../coviso_relax/base.yaml
+run_name: r18_bert_bneckcos_baseline_s42
+train:
+  record_batch_order: true
+loss:
+  bneck_cosine_lambda: 0.0

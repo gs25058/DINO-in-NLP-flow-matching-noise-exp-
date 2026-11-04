@@ -99,6 +99,12 @@ def combine_coviso(terms, lambda_mean, lambda_cov):
     )
 
 
+def bottleneck_cosine_loss(teacher, students):
+    """Mean across views and sentences; vectors are already normalized by the head."""
+    target = teacher.detach()
+    return torch.stack([(1 - (student * target).sum(dim=-1)).mean() for student in students]).mean()
+
+
 @dataclass
 class LossTerms:
     total: torch.Tensor
@@ -109,10 +115,12 @@ class LossTerms:
     lambda_cov: float
     active: bool
     diagnostics: dict
+    bneck: torch.Tensor | None = None
+    lambda_bneck: float = 0.0
 
     def scalars(self):
         mean, cov = self.mean.item(), self.cov.item()
-        return {
+        result = {
             "loss": self.total.item(),
             **{k: v.item() for k, v in self.diagnostics.items()},
             "L_DINO": self.dino.item(),
@@ -123,6 +131,14 @@ class LossTerms:
             "weighted_mean": self.lambda_mean * mean if self.active else 0.0,
             "weighted_cov": self.lambda_cov * cov if self.active else 0.0,
         }
+        if self.bneck is not None:
+            result.update(
+                L_bneck=self.bneck.item(),
+                bneck_cosine=1 - self.bneck.item(),
+                lambda_bneck=self.lambda_bneck,
+                weighted_bneck=self.lambda_bneck * self.bneck.item(),
+            )
+        return result
 
 
 class DINOObjective(nn.Module):
@@ -141,9 +157,21 @@ class DINOObjective(nn.Module):
             cfg["cov_iso_start_step"],
             cfg["student_temp"],
         )
+        self.bneck_weight = float(cfg.get("bneck_cosine_lambda", 0.0))
+        if not math.isfinite(self.bneck_weight) or self.bneck_weight < 0:
+            raise ValueError("bneck_cosine_lambda must be finite and nonnegative")
+        self.record_bneck = "bneck_cosine_lambda" in cfg
 
     def forward(
-        self, teacher_logits, student_embeddings, student_logits, step, teacher_temp
+        self,
+        teacher_logits,
+        student_embeddings,
+        student_logits,
+        step,
+        teacher_temp,
+        *,
+        teacher_bottleneck=None,
+        student_bottlenecks=None,
     ) -> LossTerms:
         terms = [self.covariance(z) for z in student_embeddings]
         dino, diagnostics = self.dino(
@@ -153,6 +181,18 @@ class DINOObjective(nn.Module):
         cov = torch.stack([t.cov for t in terms]).mean()
         active = step >= self.start_step
         total = dino + combine_coviso(terms, self.mean_weight, self.cov_weight) if active else dino
+        bneck = None
+        if self.record_bneck:
+            if teacher_bottleneck is None or student_bottlenecks is None:
+                raise ValueError(
+                    "bottleneck experiment requires cached teacher and student bottlenecks"
+                )
+            if self.bneck_weight > 0:
+                bneck = bottleneck_cosine_loss(teacher_bottleneck, student_bottlenecks)
+                total = total + self.bneck_weight * bneck
+            else:
+                with torch.no_grad():
+                    bneck = bottleneck_cosine_loss(teacher_bottleneck, student_bottlenecks)
         return LossTerms(
             total,
             dino,
@@ -162,6 +202,8 @@ class DINOObjective(nn.Module):
             self.cov_weight,
             active,
             diagnostics,
+            bneck,
+            self.bneck_weight,
         )
 
 

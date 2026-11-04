@@ -1,5 +1,9 @@
 # 현재 실험의 학습 방법
 
+이 문서는 보존하는 기준선 수식이다. 현재 브랜치의 선택적 추가항은
+[bottleneck cosine 사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)에 정의한다.
+MLP→L2→8192 확장 직전의 256d 벡터를 재사용하며, 새 키 부재/가중치0은 아래의 기존 손실과 동일하다.
+
 ## 데이터와 예측 대상
 
 `princeton-nlp/datasets-for-simcse/wiki1m_for_simcse.txt`의 영어 문장 중 10자 미만을 제거한다.

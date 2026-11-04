@@ -14,6 +14,12 @@ def masked_mean_pool(hidden_states, attention_mask):
     return (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
 
 
+@dataclass
+class HeadOutput:
+    logits: torch.Tensor
+    bottleneck: torch.Tensor
+
+
 class DINOHead(nn.Module):
     """MLP bottleneck → L2 normalization → weight-normalized prototypes."""
 
@@ -27,7 +33,8 @@ class DINOHead(nn.Module):
         )
 
     def forward(self, pooled):
-        return self.expand(F.normalize(self.mlp(pooled), p=2, dim=-1))
+        bottleneck = F.normalize(self.mlp(pooled), p=2, dim=-1)
+        return HeadOutput(self.expand(bottleneck), bottleneck)
 
 
 @dataclass
@@ -35,6 +42,7 @@ class ModelOutput:
     embedding: torch.Tensor
     logits: torch.Tensor
     pooled: torch.Tensor
+    bottleneck: torch.Tensor
 
 
 class DinoTextModel(nn.Module):
@@ -61,7 +69,11 @@ class DinoTextModel(nn.Module):
             inputs_embeds=inputs_embeds, attention_mask=attention_mask
         ).last_hidden_state
         pooled = masked_mean_pool(hidden, attention_mask)
-        return ModelOutput(F.normalize(pooled, p=2, dim=-1), self.head(pooled), pooled)
+        # Keep embedding normalization before the head: backward accumulation
+        # order matters when CE and covariance both reach the pooled vector.
+        embedding = F.normalize(pooled, p=2, dim=-1)
+        head = self.head(pooled)
+        return ModelOutput(embedding, head.logits, pooled, head.bottleneck)
 
 
 class EMATeacher:

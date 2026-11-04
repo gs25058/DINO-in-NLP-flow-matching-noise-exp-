@@ -1,4 +1,14 @@
-# FlowDINO: 공동 Optuna 실험
+# FlowDINO
+
+현재 브랜치의 추가 실험은 **256d bottleneck cosine 보조 손실**이다.
+[실행 안내](docs/experiments/bottleneck_cosine/README.md)와
+[사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)을 따른다.
+기존 DINO CE·768d covariance·noise를 유지하고, 양쪽20trial×4000step으로 LR/head LR/teacher 온도를
+동일 범위에서 튜닝한다. 보조항 가중치는 상태를 바꾸지 않는 초기 gradient 측정으로 보정한다.
+새 seed101/102/103에서 각 top3를 확인한 뒤 선택을 고정하고, λ만0인 ablation과 768d STS7을 비교한다.
+256d STS와 view cosine은 별도 진단이다. main 병합·원격 push는 하지 않는다.
+
+아래는 기존 공통 학습과 19축 실험 경로이며 그대로 보존한다.
 
 영어 wiki1m 문장을 BERT로 인코딩하고, 깨끗한 EMA teacher의 prototype 분포를
 가우시안 보간 노이즈를 받은 학생 뷰 3개가 예측한다. 문장 표현은 마지막 hidden state의

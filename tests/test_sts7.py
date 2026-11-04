@@ -21,7 +21,7 @@ def test_sts7_uses_seven_fixed_test_splits_and_unweighted_mean(monkeypatch):
         [[1.0, 0, 0, 0], [0.6, 0.8, 0, 0], [0.916515, 0, 0.4, 0], [0.994987, 0, 0, 0.1]]
     )
 
-    def encode(model, tokenizer, sentences, *args):
+    def encode(model, tokenizer, sentences, *args, **kwargs):
         return {"embedding": first if sentences[0] == "a" else second}
 
     monkeypatch.setattr(evaluate, "load_dataset", dataset)

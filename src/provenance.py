@@ -103,7 +103,7 @@ def write_json(path, data):
     temp.replace(path)
 
 
-def prepare(campaign, workspace, gpus, report):
+def prepare(campaign, workspace, gpus, report, experiment_dir="coviso_relax"):
     campaign.mkdir(parents=True, exist_ok=False)
     source = campaign / "source"
     source.mkdir()
@@ -122,7 +122,7 @@ def prepare(campaign, workspace, gpus, report):
     ):
         shutil.copy2(workspace / name, source / name)
     for name in ("OPTUNA_SPEC.md", "baseline_provenance.json", "validation.json"):
-        shutil.copy2(workspace / "docs/experiments/coviso_relax" / name, campaign / name)
+        shutil.copy2(workspace / "docs/experiments" / experiment_dir / name, campaign / name)
     files = {
         str(path.relative_to(source)): sha256_file(path)
         for path in source.rglob("*")
