@@ -1,4 +1,4 @@
-"""Paired 20×4000 Optuna, fresh 3-seed confirmations, fixed aux-off, then STS7."""
+"""Paired 20×4000 Optuna, fresh 3-seed confirmations, component ablations, then STS7."""
 
 import argparse
 import copy
@@ -39,12 +39,14 @@ def set_stage(campaign, stage, **extra):
 
 def save_config(campaign, manifest, base, label, seed):
     cfg = copy.deepcopy(base)
-    cfg.update(seed=seed, run_name=f"bneckcos_{campaign.name}_{label}_s{seed}")
+    protocol = manifest.get("protocol", "bottleneck_cosine")
+    prefix = "bneckiso" if protocol == "bottleneck_iso" else "bneckcos"
+    cfg.update(seed=seed, run_name=f"{prefix}_{campaign.name}_{label}_s{seed}")
     for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
         cfg["data"][key] = str(Path(manifest["workspace"]) / cfg["data"][key])
     cfg["experiment"] = {
         "source_manifest": str(campaign / "source_manifest.json"),
-        "protocol": "bottleneck_cosine",
+        "protocol": protocol,
         "label": label,
         "fresh_pretrained_start": True,
         "spec_sha256": manifest["spec_sha256"],
@@ -235,28 +237,32 @@ def confirm(campaign, manifest, studies, children, calibration):
 
 
 def ablate(campaign, manifest, groups, children):
-    off = load_config(groups["bottleneck"][str(CONFIRM_SEEDS[0])]["config"])
-    off["loss"]["bneck_cosine_lambda"] = 0.0
-    results = {}
-    parallel_jobs(
-        CONFIRM_SEEDS,
-        manifest["gpus"],
-        children,
-        lambda gpu, seed: execute_train(campaign, manifest, children, gpu, off, "aux_off", seed),
-        lambda seed, run: results.update({str(seed): run}),
-    )
-    groups["aux_off"] = results
-    write_json(campaign / "final_runs.json", groups)
-    for seed in CONFIRM_SEEDS:
-        original = load_config(groups["bottleneck"][str(seed)]["config"])
-        changed = load_config(results[str(seed)]["config"])
-        for cfg in (original, changed):
-            cfg.pop("run_name")
-            cfg.pop("experiment")
-            cfg["loss"].pop("bneck_cosine_lambda")
-        if original != changed:
-            raise RuntimeError("aux-off changed another hyperparameter")
-    return list(results.values())
+    settings = {"aux_off": "bneck_cosine_lambda"}
+    if manifest.get("protocol") == "bottleneck_iso":
+        settings["iso_off"] = "bneck_iso_lambda"
+    all_runs = []
+    for group, key in settings.items():
+        off = load_config(groups["bottleneck"][str(CONFIRM_SEEDS[0])]["config"])
+        off["loss"][key] = 0.0
+        results = {}
+        parallel_jobs(
+            CONFIRM_SEEDS, manifest["gpus"], children,
+            lambda gpu, seed: execute_train(campaign, manifest, children, gpu, off, group, seed),
+            lambda seed, run: results.update({str(seed): run}),
+        )
+        groups[group] = results
+        write_json(campaign / "final_runs.json", groups)
+        for seed in CONFIRM_SEEDS:
+            original = load_config(groups["bottleneck"][str(seed)]["config"])
+            changed = load_config(results[str(seed)]["config"])
+            for cfg in (original, changed):
+                cfg.pop("run_name")
+                cfg.pop("experiment")
+                cfg["loss"].pop(key)
+            if original != changed:
+                raise RuntimeError(f"{group} changed another hyperparameter")
+        all_runs.extend(results.values())
+    return all_runs
 
 
 def evaluate(campaign, manifest, groups, children):
@@ -318,9 +324,17 @@ def run(campaign, manifest):
         PYTHONDONTWRITEBYTECODE="1",
     )
     children = Children(campaign, env)
-    signal.signal(signal.SIGTERM, children.stop)
-    signal.signal(signal.SIGINT, children.stop)
-    base = load_config(campaign / "source/configs/bottleneck_cosine/base.yaml")
+    requested_stop = False
+
+    def stop(*_):
+        nonlocal requested_stop
+        requested_stop = True
+        children.stop()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    protocol = manifest.get("protocol", "bottleneck_cosine")
+    base = load_config(campaign / "source/configs" / protocol / "base.yaml")
     stage = "calibration"
     try:
         set_stage(campaign, stage)
@@ -346,6 +360,7 @@ def run(campaign, manifest):
                 "common_space": common_space(base),
                 "lambda_range": calibration["lambda_range"],
                 "lambda_anchor": calibration["lambda_anchor"],
+                **{key: value for key, value in calibration.items() if key.startswith("iso_lambda_")},
                 "trials_per_arm": manifest["trials_per_arm"],
                 "steps": 4000,
                 "pruning": "none",
@@ -363,6 +378,10 @@ def run(campaign, manifest):
             cfg["loss"]["bneck_cosine_lambda"] = (
                 calibration["lambda_anchor"] if arm == "bottleneck" else 0.0
             )
+            if "bneck_iso_lambda" in cfg["loss"]:
+                cfg["loss"]["bneck_iso_lambda"] = (
+                    calibration["iso_lambda_anchor"] if arm == "bottleneck" else 0.0
+                )
             return execute_train(
                 campaign, manifest, children, gpu, cfg, f"smoke_{arm}", SEARCH_SEED, smoke=True
             )
@@ -393,7 +412,8 @@ def run(campaign, manifest):
         set_stage(campaign, "complete")
     except BaseException as exc:
         children.stop()
-        set_stage(campaign, "failed", failed_stage=stage, error=str(exc))
+        set_stage(campaign, "stopped_by_user" if requested_stop else "failed",
+                  interrupted_stage=stage, error=str(exc))
         raise
 
 
@@ -407,6 +427,8 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--calibration-child", action="store_true")
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--with-bneck-iso", action="store_true",
+                        help="joint cosine + 256d isotropy protocol, with iso-off confirmation")
     args = parser.parse_args()
     campaign = args.campaign.resolve()
     if args.calibration_child:
@@ -443,20 +465,22 @@ def main():
         parser.error("3–20 trials per arm required")
     if args.trials_per_arm != 20 and not args.budget_reason.strip():
         parser.error("reduced equal budget requires a reason before starting")
+    protocol = "bottleneck_iso" if args.with_bneck_iso else "bottleneck_cosine"
     manifest = prepare(
         campaign,
         ROOT,
         gpus,
-        ROOT / "docs/experiments/bottleneck_cosine/report.md",
-        experiment_dir="bottleneck_cosine",
+        ROOT / "docs/experiments" / protocol / "report.md",
+        experiment_dir=protocol,
     )
-    base = load_config(ROOT / "configs/bottleneck_cosine/base.yaml")
+    base = load_config(ROOT / "configs" / protocol / "base.yaml")
     manifest.update(
         trials_per_arm=args.trials_per_arm,
         budget_reason=args.budget_reason,
         common_space=common_space(base),
         launch_argv=sys.argv,
-        initial_workspace_branch="exp/bottleneck-cosine-paired-optuna",
+        protocol=protocol,
+        initial_workspace_branch=manifest["git"]["branch"],
     )
     write_json(campaign / "source_manifest.json", manifest)
     if not args.prepare_only:

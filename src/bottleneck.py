@@ -7,7 +7,7 @@ import random
 
 import torch
 
-from src.loss import backbone_grad_norm, bottleneck_cosine_loss
+from src.loss import CovIsoPenalty, backbone_grad_norm, bottleneck_cosine_loss
 from src.provenance import model_fingerprint
 from src.train import BatchIndexSampler
 
@@ -33,6 +33,8 @@ def anchor_parameters(base, arm, calibration):
     }
     if arm == "bottleneck":
         point["loss.bneck_cosine_lambda"] = calibration["lambda_anchor"]
+        if "bneck_iso_lambda" in base["loss"]:
+            point["loss.bneck_iso_lambda"] = calibration["iso_lambda_anchor"]
     return point
 
 
@@ -46,6 +48,11 @@ def trial_config(trial, base, arm, calibration):
         if arm == "bottleneck"
         else 0.0
     )
+    if "bneck_iso_lambda" in base["loss"]:
+        cfg["loss"]["bneck_iso_lambda"] = (
+            trial.suggest_float("loss.bneck_iso_lambda", *calibration["iso_lambda_range"], log=True)
+            if arm == "bottleneck" else 0.0
+        )
     return cfg
 
 
@@ -62,7 +69,7 @@ def tree_equal(a, b):
 def calibrate(trainer):
     """At initialization, read CE/cosine gradients on one fixed training minibatch.
 
-    No criterion forward, center/covariance updates, backward accumulation,
+    No criterion forward, persistent center/covariance updates, backward accumulation,
     optimizer/scheduler steps, or teacher updates. Restore all RNG states.
     """
     python_rng = random.getstate()
@@ -111,6 +118,30 @@ def calibrate(trainer):
             "expected_initial_gradient_ratios": [0.01, 1.0],
             "bottleneck_dim": views.teacher.bottleneck.shape[-1],
         }
+        if "bneck_iso_lambda" in trainer.cfg["loss"]:
+            # Mimic the three sequential EMA blends on disposable statistics only.
+            # The live objective's moments must remain untouched by calibration.
+            temporary = CovIsoPenalty(
+                result["bottleneck_dim"], trainer.cfg["loss"]["cov_ema_momentum"]
+            ).to(trainer.device)
+            terms = [temporary(b) for b in views.student_bottlenecks]
+            iso = torch.stack([t.total for t in terms]).mean()
+            g_iso = backbone_grad_norm(iso, parameters)
+            if not math.isfinite(g_iso) or g_iso <= 0:
+                raise ValueError("calibration requires finite, positive bottleneck iso gradient")
+            iso_equivalent = g_dino / g_iso
+            mlp = [p for p in trainer.student.head.mlp.parameters() if p.requires_grad]
+            result.update(
+                L_bneck_iso=iso.item(),
+                grad_bneck_iso_unweighted_backbone=g_iso,
+                iso_lambda_equivalent=iso_equivalent,
+                iso_lambda_range=[0.01 * iso_equivalent, iso_equivalent],
+                iso_lambda_anchor=0.1 * iso_equivalent,
+                iso_calibration="fresh disposable moments, three sequential views; activation ignored only for measurement",
+                grad_dino_mlp=backbone_grad_norm(ce, mlp),
+                grad_bneck_unweighted_mlp=backbone_grad_norm(cosine, mlp),
+                grad_bneck_iso_unweighted_mlp=backbone_grad_norm(iso, mlp),
+            )
     finally:
         random.setstate(python_rng)
         torch.set_rng_state(cpu_rng)

@@ -41,14 +41,17 @@ def paired_judgment(left, right):
 def render(campaign):
     manifest = read_json(campaign / "source_manifest.json")
     state = read_json(campaign / "state.json")
+    iso = manifest.get("protocol") == "bottleneck_iso"
+    comparisons = ("baseline", "aux_off", "iso_off") if iso else ("baseline", "aux_off")
     lines = [
-        "# Bottleneck cosine — 공정한 공동 튜닝 비교",
+        "# Bottleneck cosine + isotropy — 공정한 공동 튜닝 비교" if iso
+        else "# Bottleneck cosine — 공정한 공동 튜닝 비교",
         "",
         f"상태: **{state['stage']}**.",
         f"campaign: `{campaign}`. 실행 소스 `{manifest['git']['commit']}`, `{manifest['git']['branch']}`.",
         "R18 실제 4000-step 대조군을 사용한다. covariance와 noise는 양쪽에서 고정한다.",
         f"각 조건 {manifest['trials_per_arm']} trial ×4000 step; pruning 없음. 재검증 seed101/102/103.",
-        "주 지표는 768차원 embedding STS-B dev. 256차원 STS와 view cosine은 진단이다.",
+        "768차원 STS-B dev로 선택하고, 동결 후 768차원 STS7으로 판정한다. 256차원은 진단이다.",
         "",
         "전체 명령·exit code: commands/와 status/. resolved config: configs/. 소스 diff와 SHA: source_manifest.json, source_diff.patch.",
         f"실행기: `{' '.join(manifest.get('launch_argv', []))}`",
@@ -67,6 +70,14 @@ def render(campaign):
             "초기 한 minibatch의 gradient 규모이며 학습 전체에서 같은 비율이라고 가정하지 않는다.",
             "",
         ]
+        if iso and "iso_lambda_range" in cal:
+            lines += [
+                f"256d iso g={cal['grad_bneck_iso_unweighted_backbone']:.8g}; "
+                f"λ 동등값={cal['iso_lambda_equivalent']:.8g}, log 범위={cal['iso_lambda_range']}, "
+                f"시작 λ={cal['iso_lambda_anchor']:.8g}.",
+                "256d EMA는 768d와 독립이며 같은 momentum/activation step56을 쓴다.",
+                "",
+            ]
     for arm in ("baseline", "bottleneck"):
         database = campaign / f"{arm}.db"
         if not database.exists():
@@ -132,6 +143,30 @@ def render(campaign):
                 f"dev 차이(선택 지표), 동일 예산: `{paired_judgment(groups['baseline'], groups['bottleneck'])}`.",
                 f"dev 차이, 동일 hyperparameter 보조항: `{paired_judgment(groups['aux_off'], groups['bottleneck'])}`.",
             ]
+        if "iso_off" in groups:
+            lines += [
+                "",
+                f"dev 차이, cosine 유지·iso만 제거: `{paired_judgment(groups['iso_off'], groups['bottleneck'])}`.",
+            ]
+    if iso:
+        lines += [
+            "", "## 마지막 관측 진단 (선택에 사용하지 않음)", "",
+            "| run | step | 256 rank | 256 mean norm | 256 uniformity | view cosine | weighted iso mean/cov |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for logdir in sorted((campaign / "results/logs").glob("*")):
+            rows = read_records(logdir / "evaluations.jsonl")
+            losses = read_records(logdir / "components.jsonl")
+            if not rows or not losses:
+                continue
+            row, loss = rows[-1], losses[-1]
+            lines.append(
+                f"| {logdir.name} | {row['loop_step']} | {row.get('effective_rank_bottleneck', '')} | "
+                f"{row.get('mean_norm_bottleneck', '')} | {row.get('uniformity_bottleneck', '')} | "
+                f"{loss.get('bneck_cosine', '')} | {loss.get('weighted_bneck_iso_mean', 0)} / "
+                f"{loss.get('weighted_bneck_iso_cov', 0)} |"
+            )
+        lines += ["", "성분별 raw loss·backbone/MLP gradient는 components.jsonl과 gradient_diagnostics.jsonl에 보존한다."]
     evaluations = (
         sorted((campaign / "results/analysis").glob("*.json"))
         if (campaign / "results/analysis").exists()
@@ -165,9 +200,9 @@ def render(campaign):
             )
         if all(
             len(aggregates.get(f"{group}_best", [])) == 3
-            for group in ("baseline", "bottleneck", "aux_off")
+            for group in ("bottleneck", *comparisons)
         ):
-            for group in ("baseline", "aux_off"):
+            for group in comparisons:
                 deltas = [
                     (right - left) / 100
                     for left, right in zip(
@@ -185,6 +220,7 @@ def render(campaign):
         "",
         "미완료 단계와 점수는 추정해서 채우지 않는다. 완료 상태 전에는 최종 결론을 내리지 않는다.",
         "다른 학습률/온도를 고른 양 조건의 차이는 동일 튜닝 예산 비교이며, 보조항 자체의 효과는 aux_off와 비교한다.",
+        *(["iso_off는 cosine을 유지하면서 256d iso만 제거한다. aux_off는 iso를 유지하면서 cosine만 제거한다."] if iso else []),
         "256차원 bottleneck 지표만 개선되면 768차원 임베딩 개선으로 판정하지 않는다.",
         "과거 R18 보고 점수 대신 현재 campaign의 대조군을 비교 기준으로 삼는다.",
     ]

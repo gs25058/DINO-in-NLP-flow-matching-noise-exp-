@@ -21,7 +21,12 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from src.augment import FlowNoiseAug
-from src.evaluate import EVAL_SPACES, effective_rank_metrics, sts_b_dev_metrics_by_space
+from src.evaluate import (
+    EVAL_SPACES,
+    effective_rank_metrics,
+    geometry_by_space,
+    sts_b_dev_metrics_by_space,
+)
 from src.loss import DINOObjective, LossTerms, backbone_grad_norm, batch_kl_diagnostic
 from src.model import DinoTextModel, EMATeacher, ModelOutput
 from src.provenance import append_record, record_run
@@ -173,7 +178,10 @@ class Trainer:
             warmup_steps=max(1, int(cfg["augment"]["warmup_frac"] * train["max_steps"])),
         )
         self.objective = DINOObjective(
-            loss, self.student.backbone.config.hidden_size, model["head"]["logit_dim"]
+            loss,
+            self.student.backbone.config.hidden_size,
+            model["head"]["logit_dim"],
+            model["head"]["bottleneck_dim"],
         ).to(device)
         groups = build_param_groups(
             self.student, train["lr"], train["head_lr"], train["weight_decay"]
@@ -260,6 +268,23 @@ class Trainer:
                     if losses.lambda_bneck > 0
                     else 0.0
                 )
+            if self.cfg["eval"].get("bottleneck_geometry", False):
+                mlp = [p for p in self.student.head.mlp.parameters() if p.requires_grad]
+                diagnostics["grad_dino_mlp"] = backbone_grad_norm(losses.dino, mlp)
+                diagnostics["grad_bneck_mlp"] = (
+                    backbone_grad_norm(losses.lambda_bneck * losses.bneck, mlp)
+                    if losses.bneck is not None and losses.lambda_bneck > 0
+                    else 0.0
+                )
+                for name in ("mean", "cov"):
+                    for scope, params in (("backbone", parameters), ("mlp", mlp)):
+                        diagnostics[f"grad_bneck_iso_{name}_{scope}"] = (
+                            backbone_grad_norm(
+                                losses.lambda_bneck_iso * getattr(losses.bneck_iso, name), params
+                            )
+                            if losses.bneck_iso is not None and losses.active
+                            else 0.0
+                        )
         self.optimizer.zero_grad()
         losses.total.backward()
         diagnostics["grad_norm_total"] = torch.nn.utils.clip_grad_norm_(
@@ -301,15 +326,28 @@ class Trainer:
     def evaluate(self, step):
         metrics = sts_b_dev_metrics_by_space(self.student, self.tokenizer, self.device, EVAL_SPACES)
         final = metrics["embedding"]
-        rank, max_sv = effective_rank_metrics(
-            self.student, self.tokenizer, self.rank_sentences, self.device
-        )
+        geometry = {}
+        if getattr(self, "cfg", {}).get("eval", {}).get("bottleneck_geometry", False):
+            geometry = geometry_by_space(
+                self.student, self.tokenizer, self.rank_sentences, self.device
+            )
+            rank = geometry["embedding"]["effective_rank"]
+            max_sv = geometry["embedding"]["max_sv_ratio"]
+        else:
+            rank, max_sv = effective_rank_metrics(
+                self.student, self.tokenizer, self.rank_sentences, self.device
+            )
         log = {
             "sts_b_dev_spearman": final.spearman,
             "alignment": final.alignment,
             "uniformity": final.uniformity,
             "effective_rank": rank,
             "max_sv_ratio": max_sv,
+            **{
+                f"{key}_{space}": value
+                for space, values in geometry.items()
+                for key, value in values.items()
+            },
         }
         for space in ("bottleneck", "head"):
             row = metrics[space]
@@ -334,6 +372,7 @@ class Trainer:
                 "eff_rank": rank,
                 "max_sv_ratio": max_sv,
                 "sts_b_dev_bottleneck": metrics["bottleneck"].spearman,
+                **log,
             },
         )
         if final.spearman > self.best_sts:
@@ -352,6 +391,10 @@ class Trainer:
                 "train_cfg": self.cfg["train"],
                 "loss_cfg": self.cfg["loss"],
                 "cov_iso_state_dict": self.objective.covariance.state_dict(),
+                **(
+                    {"bneck_iso_state_dict": self.objective.bneck_covariance.state_dict()}
+                    if self.objective.bneck_covariance is not None else {}
+                ),
                 "loop_step": step,
                 "sts_b_dev": sts,
                 "best_step": self.best_step,

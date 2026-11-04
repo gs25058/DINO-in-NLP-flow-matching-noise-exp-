@@ -1,0 +1,6 @@
+extends: ../bottleneck_cosine/base.yaml
+run_name: r18_bert_bneckiso_baseline_s42
+loss:
+  bneck_iso_lambda: 0.0
+eval:
+  bottleneck_geometry: true

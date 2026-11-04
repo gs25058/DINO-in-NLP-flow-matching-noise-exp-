@@ -90,6 +90,7 @@ def test_full_training_preserves_outputs_gradients_ema_checkpoints_and_rng(
     )
     if explicit_zero:
         cfg["loss"]["bneck_cosine_lambda"] = 0.0
+        cfg["loss"]["bneck_iso_lambda"] = 0.0
         cfg["train"]["record_batch_order"] = True
     cfg.update(
         seed=case["seed"],

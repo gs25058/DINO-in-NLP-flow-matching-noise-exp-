@@ -128,6 +128,33 @@ def effective_rank_metrics(model, tokenizer, sentences, device, batch_size=64, m
     return rank, probabilities[0].item()
 
 
+def representation_geometry(embeddings):
+    """Centered spectrum plus uncentered direction concentration; diagnostics only."""
+    mean = embeddings.mean(dim=0, keepdim=True)
+    energy = torch.linalg.svdvals((embeddings - mean).double()).square()
+    total = energy.sum().item()
+    probabilities = energy / total if total > 0 else torch.zeros_like(energy)
+    n = len(embeddings)
+    return {
+        "effective_rank": torch.exp(
+            -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+        ).item() if total > 0 else 0.0,
+        "max_sv_ratio": probabilities[0].item(),
+        "mean_norm": mean.norm().item(),
+        "mean_pair_cosine": (
+            (embeddings.sum(dim=0).square().sum() - embeddings.square().sum()) / (n * (n - 1))
+        ).item() if n > 1 else 0.0,
+    }
+
+
+def geometry_by_space(model, tokenizer, sentences, device, batch_size=64, max_length=128):
+    embeddings = encode_sentences(
+        model, tokenizer, sentences, device, batch_size, max_length,
+        spaces=("embedding", "bottleneck"),
+    )
+    return {space: representation_geometry(z) for space, z in embeddings.items()}
+
+
 def sts_suite_by_space(
     model, tokenizer, device, batch_size=64, max_length=128, spaces=("embedding", "bottleneck")
 ):

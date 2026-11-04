@@ -1,12 +1,14 @@
 # FlowDINO
 
-현재 브랜치의 추가 실험은 **256d bottleneck cosine 보조 손실**이다.
-[실행 안내](docs/experiments/bottleneck_cosine/README.md)와
-[사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)을 따른다.
+현재 브랜치의 추가 실험은 **256d bottleneck cosine + isotropy 보조 손실**이다.
+[실행 안내](docs/experiments/bottleneck_iso/README.md)와
+[사전 등록](docs/experiments/bottleneck_iso/OPTUNA_SPEC.md)을 따른다.
 기존 DINO CE·768d covariance·noise를 유지하고, 양쪽20trial×4000step으로 LR/head LR/teacher 온도를
 동일 범위에서 튜닝한다. 보조항 가중치는 상태를 바꾸지 않는 초기 gradient 측정으로 보정한다.
-새 seed101/102/103에서 각 top3를 확인한 뒤 선택을 고정하고, λ만0인 ablation과 768d STS7을 비교한다.
+새 seed101/102/103에서 각 top3를 확인한 뒤 선택을 고정하고, cosine만0/iso만0인 ablation과 768d STS7을 비교한다.
 256d STS와 view cosine은 별도 진단이다. main 병합·원격 push는 하지 않는다.
+256d iso는 768d와 별도의 EMA 통계로 계산하며, 가중치0에서는 기존 경로를 그대로 쓴다.
+이전 cosine 단독 탐색은 사용자 승인으로 중단했고 결과·checkpoint는 보존했다.
 
 아래는 기존 공통 학습과 19축 실험 경로이며 그대로 보존한다.
 

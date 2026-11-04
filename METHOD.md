@@ -1,8 +1,12 @@
 # 현재 실험의 학습 방법
 
 이 문서는 보존하는 기준선 수식이다. 현재 브랜치의 선택적 추가항은
-[bottleneck cosine 사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)에 정의한다.
+[bottleneck cosine 사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)과
+[bottleneck iso 사전 등록](docs/experiments/bottleneck_iso/OPTUNA_SPEC.md)에 정의한다.
 MLP→L2→8192 확장 직전의 256d 벡터를 재사용하며, 새 키 부재/가중치0은 아래의 기존 손실과 동일하다.
+현재 추가 실험은 cosine을 유지하면서 256d에서도 같은 iso 수식을 독립 통계로 계산한다.
+768d iso를 옮기거나 제거하지 않는다. 256d iso의 momentum·activation56은 기존과 같고,
+`bneck_iso_lambda` 하나가 256d mean+cov 합에 적용된다.
 
 ## 데이터와 예측 대상
 

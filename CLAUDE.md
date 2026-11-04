@@ -1,7 +1,9 @@
 # 현재 브랜치 작업 지침
 
-이 브랜치의 현재 실험은 BERT flow-noise DINO의 256d bottleneck cosine 보조항이다.
-새 예산·보정·선택 규칙은 [bottleneck 명세](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)를 따른다.
+이 브랜치의 현재 실험은 BERT flow-noise DINO의 256d bottleneck cosine + isotropy 보조항이다.
+새 예산·보정·선택 규칙은 [bottleneck iso 명세](docs/experiments/bottleneck_iso/OPTUNA_SPEC.md)를 따른다.
+256d EMA 통계는 768d와 독립이며, 768d iso는 그대로 유지한다.
+이전 cosine 탐색은 사용자 승인으로 중단했다. 기존 결과와 cosine 단독 실행 경로를 보존한다.
 기존 19축 공동 Optuna 실험 코드·결과·미커밋 보고서와 선택 config는 보존한다.
 기준 방법은 [METHOD.md](METHOD.md), 이전 실험 명세는
 [OPTUNA_SPEC.md](docs/experiments/coviso_relax/OPTUNA_SPEC.md)에 있다.

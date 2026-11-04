@@ -1,0 +1,11 @@
+{
+  "before_tests": 71,
+  "after_tests": 84,
+  "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python -m pytest -q",
+  "zero_and_missing_iso": "bit-identical existing tiny-BERT trajectories and cosine-positive objective gradients",
+  "iso_checks": "independent 768/256 moments, three sequential view updates,55/56 boundary, teacher/history detach, backbone/MLP gradients",
+  "calibration": "CPU state preservation, gradient-scaled cosine/iso ranges, live positive-iso buffers unchanged",
+  "pipeline": "synthetic equal3-per-arm test only,18 confirmations,6 component ablations,24 dual-space tests; frozen dev selection",
+  "gpu_smoke": "pending",
+  "gpu_experiment": "not run"
+}

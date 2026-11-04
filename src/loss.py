@@ -57,7 +57,7 @@ class CovarianceTerms:
 
 
 class CovIsoPenalty(nn.Module):
-    """||μ||² + ||C/tr(C)−I/D||²_F on normalized sentence embeddings.
+    """||μ||² + ||C/tr(C)−I/D||²_F on normalized student representations.
 
     Blend detached *previous* EMA with this view's differentiable moments,
     then update the buffers. Three views mean three sequential updates, also
@@ -117,6 +117,8 @@ class LossTerms:
     diagnostics: dict
     bneck: torch.Tensor | None = None
     lambda_bneck: float = 0.0
+    bneck_iso: CovarianceTerms | None = None
+    lambda_bneck_iso: float = 0.0
 
     def scalars(self):
         mean, cov = self.mean.item(), self.cov.item()
@@ -138,13 +140,21 @@ class LossTerms:
                 lambda_bneck=self.lambda_bneck,
                 weighted_bneck=self.lambda_bneck * self.bneck.item(),
             )
+        if self.bneck_iso is not None:
+            result["lambda_bneck_iso"] = self.lambda_bneck_iso
+            for name in ("mean", "cov"):
+                value = getattr(self.bneck_iso, name).item()
+                result[f"L_bneck_iso_{name}"] = value
+                result[f"weighted_bneck_iso_{name}"] = (
+                    self.lambda_bneck_iso * value if self.active else 0.0
+                )
         return result
 
 
 class DINOObjective(nn.Module):
-    """One objective for every trial: DINO + λmean·mean + λcov·covariance."""
+    """DINO + sentence iso, with optional cosine and independent bottleneck iso."""
 
-    def __init__(self, cfg, embed_dim, logit_dim):
+    def __init__(self, cfg, embed_dim, logit_dim, bottleneck_dim=None):
         super().__init__()
         self.dino = DINOLoss(logit_dim, cfg["center_momentum"])
         self.covariance = CovIsoPenalty(embed_dim, cfg["cov_ema_momentum"])
@@ -161,6 +171,18 @@ class DINOObjective(nn.Module):
         if not math.isfinite(self.bneck_weight) or self.bneck_weight < 0:
             raise ValueError("bneck_cosine_lambda must be finite and nonnegative")
         self.record_bneck = "bneck_cosine_lambda" in cfg
+        self.bneck_iso_weight = float(cfg.get("bneck_iso_lambda", 0.0))
+        if not math.isfinite(self.bneck_iso_weight) or self.bneck_iso_weight < 0:
+            raise ValueError("bneck_iso_lambda must be finite and nonnegative")
+        if self.bneck_iso_weight > 0 and bottleneck_dim is None:
+            raise ValueError("bottleneck_dim is required for bottleneck isotropy")
+        # Independent moments; share the baseline's momentum and activation step.
+        # At zero, do not allocate buffers or touch the existing computation graph.
+        self.bneck_covariance = (
+            CovIsoPenalty(bottleneck_dim, cfg["cov_ema_momentum"])
+            if self.bneck_iso_weight > 0
+            else None
+        )
 
     def forward(
         self,
@@ -193,6 +215,19 @@ class DINOObjective(nn.Module):
             else:
                 with torch.no_grad():
                     bneck = bottleneck_cosine_loss(teacher_bottleneck, student_bottlenecks)
+        bneck_iso = None
+        if self.bneck_covariance is not None:
+            if student_bottlenecks is None:
+                raise ValueError("bottleneck isotropy requires cached student bottlenecks")
+            iso_terms = [self.bneck_covariance(b) for b in student_bottlenecks]
+            bneck_iso = CovarianceTerms(
+                **{
+                    name: torch.stack([getattr(t, name) for t in iso_terms]).mean()
+                    for name in ("total", "mean", "cov")
+                }
+            )
+            if active:
+                total = total + self.bneck_iso_weight * bneck_iso.total
         return LossTerms(
             total,
             dino,
@@ -204,6 +239,8 @@ class DINOObjective(nn.Module):
             diagnostics,
             bneck,
             self.bneck_weight,
+            bneck_iso,
+            self.bneck_iso_weight,
         )
 
 
