@@ -4,7 +4,20 @@
   "zero_and_missing_setting": "2 settings x2 seeds x60 CPU tiny-BERT steps, bit-identical outputs/gradients/student/teacher/covariance/RNG to preexisting fixture",
   "calibration_state_preservation": "unit-tested optimizer/scheduler/criterion/teacher/model/.grad and Python/Torch RNG",
   "pipeline": "synthetic child integration: equal 3-per-arm unit budget, 18 confirmations,3 aux_off,18 dual-space test jobs; no real scores",
-  "gpu_smoke": "not run yet",
-  "gpu_experiment": "not run yet",
-  "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q"
+  "gpu_smoke": "both baseline/bottleneck complete 60 steps, exit0; full 4000-step schedules kept",
+  "gpu_experiment": "paired 20+20 trials launched; results pending",
+  "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache MPLCONFIGDIR=/tmp/flowdino-mpl uv run --no-sync python -m pytest -q",
+  "gpu_calibration": "complete, all state_proof checks true",
+  "actual_source_commit": "c11fe95172804442292ca14a871ad2ae2beadc08",
+  "calibration": {
+    "grad_dino_backbone": 0.21253527700901031,
+    "grad_bneck_unweighted_backbone": 1.2067559957504272,
+    "lambda_range": [
+      0.0017612116928148694,
+      0.17612116928148694
+    ],
+    "lambda_anchor": 0.017612116928148694
+  },
+  "zero_gpu_comparison": "results/experiments/bneck_cosine_20261104/zero_gpu_equivalence_audit.json",
+  "zero_gpu_max_abs_difference": 0.0
 }
