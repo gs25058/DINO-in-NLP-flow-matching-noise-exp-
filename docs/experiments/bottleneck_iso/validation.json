@@ -4,8 +4,40 @@
   "cpu_command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python -m pytest -q",
   "zero_and_missing_iso": "bit-identical existing tiny-BERT trajectories and cosine-positive objective gradients",
   "iso_checks": "independent 768/256 moments, three sequential view updates,55/56 boundary, teacher/history detach, backbone/MLP gradients",
-  "calibration": "CPU state preservation, gradient-scaled cosine/iso ranges, live positive-iso buffers unchanged",
+  "calibration": {
+    "grad_dino_backbone": 0.21253527700901031,
+    "grad_bneck_unweighted_backbone": 1.2067559957504272,
+    "grad_bneck_iso_unweighted_backbone": 0.2566289007663727,
+    "lambda_range": [
+      0.0017612116928148694,
+      0.17612116928148694
+    ],
+    "lambda_anchor": 0.017612116928148694,
+    "iso_lambda_range": [
+      0.00828181379315871,
+      0.828181379315871
+    ],
+    "iso_lambda_anchor": 0.0828181379315871
+  },
   "pipeline": "synthetic equal3-per-arm test only,18 confirmations,6 component ablations,24 dual-space tests; frozen dev selection",
-  "gpu_smoke": "pending",
-  "gpu_experiment": "not run"
+  "gpu_smoke": {
+    "baseline": {
+      "completed_steps": 60,
+      "status": "smoke_complete",
+      "exit_code": 0
+    },
+    "bottleneck": {
+      "completed_steps": 60,
+      "status": "smoke_complete",
+      "exit_code": 0
+    }
+  },
+  "gpu_experiment": "paired20+20 full4000-step search running; no full-budget trial complete at this update",
+  "actual_source_commit": "ee13213dc05e9ac3f82ae970329ccf0e2f655a83",
+  "gpu_calibration": "complete; all nine state_proof checks true",
+  "zero_iso_gpu_comparison": "results/experiments/bneck_iso_20261104/zero_iso_gpu_equivalence_audit.json",
+  "zero_iso_gpu_max_abs_difference": 0.0,
+  "campaign": "results/experiments/bneck_iso_20261104",
+  "supervisor_pid": 387799,
+  "admission": "initially waited for unrelated same-account GPU jobs; guard subsequently admitted our two workers"
 }

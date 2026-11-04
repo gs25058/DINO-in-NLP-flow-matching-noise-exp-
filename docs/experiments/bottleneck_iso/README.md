@@ -34,3 +34,17 @@ uv run --no-sync python scripts/report_bottleneck.py \
 중지할 때는 현재 campaign의 정확한 supervisor PID에만 SIGTERM을 보낸다.
 guard의 자식 종료·예약 해제를 확인한 다음 별도 호출로 다음 작업을 실행한다.
 예전 cosine campaign은 사용자 요청으로 중단됐으며 완료 결과와 부분 로그를 그대로 보존한다.
+
+## 2026-11-04 실행 확인
+
+실행 소스는 `ee13213`, campaign은 `results/experiments/bneck_iso_20261104`다.
+수정 전71개/수정 후84개 테스트가 통과했다. GPU 보정에서9개 상태 보존 검사를 모두 통과했고,
+두 조건60-step smoke도 각각 exit0으로 완료했다. iso=0 GPU smoke의 기존 공통
+출력·손실·gradient·평가 최대 차이는0이며 초기값과 batch 순서 hash도 같았다.
+근거는 [validation.json](validation.json)과 campaign의 `zero_iso_gpu_equivalence_audit.json`에 있다.
+
+실측 보정 log 범위는 cosine `[0.0017612116928148694, 0.17612116928148694]`,
+iso256 `[0.00828181379315871, 0.828181379315871]`이다. 각각 trial의 가중치가 이 범위에서
+선택된다는 뜻이며, 학습 전체의 gradient 비율을 고정하는 방식은 아니다.
+현재20+20 trial 탐색을 시작했으며 4000-step 결과·최종 개선 판정은 아직 없다.
+GPU 규약에 따라 동일 계정의 다른 작업이 있으면 다음 작업의 admission이 대기할 수 있다.
