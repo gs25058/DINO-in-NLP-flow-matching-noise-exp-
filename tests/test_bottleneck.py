@@ -300,7 +300,12 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
             name = command[command.index("--runs") + 1]
             output = Path(command[command.index("--out") + 1])
             scores = {"avg_7task": 0.7}
-            write_json(output, {"runs": {name: scores}, "bottleneck_diagnostic": {name: scores}})
+            # A better 256d diagnostic alone must never produce a positive
+            # conclusion for the unchanged 768d primary representation.
+            diagnostic = {"avg_7task": 0.99 if label.startswith("eval_bottleneck_") else 0.5}
+            write_json(
+                output, {"runs": {name: scores}, "bottleneck_diagnostic": {name: diagnostic}}
+            )
 
     monkeypatch.setattr(pipeline.Children, "run", execute)
     handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -322,3 +327,10 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
     assert sum(x.startswith("train_confirm_") for x in calls) == 18
     assert sum(x.startswith("train_aux_off_") for x in calls) == 3
     assert sum(x.startswith("eval_") for x in calls) == 18
+    conclusions = [
+        line
+        for line in (campaign / "report.md").read_text().splitlines()
+        if line.startswith("**주 평가:")
+    ]
+    assert len(conclusions) == 2
+    assert all("'verdict': '기각'" in line for line in conclusions)
