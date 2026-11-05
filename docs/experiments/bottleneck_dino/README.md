@@ -24,5 +24,7 @@ disown
 
 2026-11-05: 구현 후88개 테스트 통과. seed42/101/102/103의 기존 초기 full hash를
 정확히 재현했고, 실제 campaign에서 source·data·평가 cache·고정 설정을 검증했다.
-실행 소스는 `8471057`, supervisor PID1085051이다. 새 학습은 GPU 슬롯 대기 중이며,
-실제 진행·완료 여부는 campaign `state.json`과 `status/`를 확인한다. 실행하지 않은 점수는 없다.
+실행 소스는 `8471057`이다. 새29회 full training과6개 test까지 모두 완료했다.
+[최종 결과](RESULTS.md): 768d STS7은 기준선65.816±0.588, 직접DINO64.049±0.409로
+개선 가설은 기각됐다.256d 진단 STS7은58.155→60.355로 개선됐다.
+재사용 설정은 `configs/bottleneck_dino/selected.yaml`이며 실제 resolved config와 일치한다.

@@ -1,8 +1,8 @@
 {
   "before_tests": 84,
   "after_tests": 88,
-  "gpu_smoke": "queued at account-wide2-process limit; no new GPU computation yet",
-  "training": "queued: new direct256 architecture only,20 trials; previous baseline is fixed",
+  "gpu_smoke": "both60-step smokes complete exit0; baseline common metrics max_abs_difference0",
+  "training": "complete:20 Optuna4000-step trials+9 confirmations; fixed baseline not retuned",
   "zero_regression": "existing tiny-BERT loss/output/gradient/EMA/RNG fixtures remain bit-identical",
   "direct_objective": "256d logits reused without prototypes; previous center and teacher/student temperatures match explicit CE; covariance only256d;3updates; no teacher or768d loss gradients",
   "checkpoint": "center256 and covariance256 saved; strict model loading without expansion",
@@ -15,5 +15,24 @@
   "fixed_baseline_retuned": false,
   "search_arms": [
     "bottleneck"
-  ]
+  ],
+  "completed_kst": "2026-11-05T18:55:00.074768+09:00",
+  "full_training_runs": 29,
+  "new_sts7_evaluations": 6,
+  "all_command_returncodes_zero": true,
+  "source_snapshot_reverified": true,
+  "baseline_gpu_equivalence": "baseline_gpu_equivalence_audit.json: max difference0",
+  "checkpoint_structure": "no prototypes; center256; covariance256x256; no cosine/768d iso",
+  "selected_config": "configs/bottleneck_dino/selected.yaml",
+  "selected_config_matches_resolved": true,
+  "primary_judgment": {
+    "verdict": "\uae30\uac01",
+    "paired_best_deltas": [
+      -0.019136268915424415,
+      -0.012289522917593776,
+      -0.02158803788110597
+    ],
+    "paired_mean": -0.01767127657137472,
+    "paired_sample_sd": 0.004819257936421147
+  }
 }

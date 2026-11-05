@@ -1,0 +1,14 @@
+extends: direct.yaml
+run_name: direct_bneck_dino_selected_s42
+train:
+  lr: 5.147714796903899e-05
+  head_lr: 0.00031962576827391267
+loss:
+  student_temp: 0.10791228321287379
+  teacher_temp: 0.10177588383777081
+  cov_iso_mean_lambda: 5.711075084680992
+  cov_iso_cov_lambda: 5.711075084680992
+experiment:
+  selected_from_dev_only: true
+  selected_trial: 15
+  source_campaign: results/experiments/bneck_dino256_20261105
