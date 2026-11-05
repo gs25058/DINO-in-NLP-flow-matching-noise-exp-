@@ -1,12 +1,19 @@
 {
   "before_tests": 84,
   "after_tests": 88,
-  "gpu_smoke": "not run",
-  "training": "not run",
+  "gpu_smoke": "queued at account-wide2-process limit; no new GPU computation yet",
+  "training": "queued: new direct256 architecture only,20 trials; previous baseline is fixed",
   "zero_regression": "existing tiny-BERT loss/output/gradient/EMA/RNG fixtures remain bit-identical",
   "direct_objective": "256d logits reused without prototypes; previous center and teacher/student temperatures match explicit CE; covariance only256d;3updates; no teacher or768d loss gradients",
   "checkpoint": "center256 and covariance256 saved; strict model loading without expansion",
   "pipeline": "synthetic3-trial test: baseline not searched,9 confirmations,6 new test calls after selection, old baseline test imported",
-  "fixed_reference": "CPU initialization-only verification succeeded for seeds42/101/102/103; previous full model hashes reproduced exactly; source/data hashes checked",
-  "fixed_reference_probe_log": "/tmp/flowdino-direct-reference-probe.log"
+  "fixed_reference": "complete in live campaign: all4 seed initial full hashes reproduced; resolved config, fixed protocol, source/data/evaluation-cache SHA verified; baseline scores imported without retuning",
+  "fixed_reference_probe_log": "/tmp/flowdino-direct-reference-probe.log",
+  "actual_source_commit": "8471057ed928aaac151f71ea0fe7b108ac83cb96",
+  "campaign": "results/experiments/bneck_dino256_20261105",
+  "supervisor_pid": 1085051,
+  "fixed_baseline_retuned": false,
+  "search_arms": [
+    "bottleneck"
+  ]
 }

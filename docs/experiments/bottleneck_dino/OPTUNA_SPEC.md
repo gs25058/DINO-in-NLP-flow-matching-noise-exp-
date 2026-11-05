@@ -40,7 +40,7 @@ config는 `configs/coviso_relax/base.yaml`, 정확한 mean/cov 가중치는5.874
 기준선 source snapshot, 데이터 SHA,4000-step 완료, 각 seed의 초기 full model hash를 확인한다.
 CPU에서 **초기화만** 재구성하여 full hash가 과거 run과 같은지 검증하고, backbone+MLP 공유
 파라미터 hash를 새 run의 초기값과 대조한다. 기존 로그·checkpoint·원본 점수는 수정하지 않는다.
-기존6개 best/last STS7 결과를 참조로 복사하고 기준선 학습/평가를 다시 실행하지 않는다.
+기존6개 best/last STS7 결과를 참조로 복사하고 기준선4000-step 재학습·STS7 재평가는 하지 않는다.
 기준선 test는 이미 알려져 있음을 명시한다. 새 모델의 test를 설정 선택에 사용하지 않는다.
 
 양 조건60-step 스모크 중 기준선은 기존 source와의 동작 보존 확인용이며 재튜닝이 아니다.

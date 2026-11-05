@@ -21,3 +21,8 @@ disown
 고정 참조 검증은 campaign `fixed_baseline.json`, 실제 trial은 `configs/search_bottleneck_t*_s42.yaml`에 있다.
 진행은 `state.json`·[report.md](report.md), 선택은 `selection.json`, 검증은 [validation.json](validation.json)에 기록한다.
 새 모델 test는 선택 고정 후6평가이며, 기존 기준선 test를 참조한 점수와 구분한다.
+
+2026-11-05: 구현 후88개 테스트 통과. seed42/101/102/103의 기존 초기 full hash를
+정확히 재현했고, 실제 campaign에서 source·data·평가 cache·고정 설정을 검증했다.
+실행 소스는 `8471057`, supervisor PID1085051이다. 새 학습은 GPU 슬롯 대기 중이며,
+실제 진행·완료 여부는 campaign `state.json`과 `status/`를 확인한다. 실행하지 않은 점수는 없다.
