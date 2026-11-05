@@ -32,12 +32,49 @@
       "exit_code": 0
     }
   },
-  "gpu_experiment": "paired20+20 full4000-step search running; no full-budget trial complete at this update",
+  "gpu_experiment": "complete:40 search+18 confirmation+6 ablation full4000-step runs;24 dual-space STS7 evaluations",
   "actual_source_commit": "ee13213dc05e9ac3f82ae970329ccf0e2f655a83",
   "gpu_calibration": "complete; all nine state_proof checks true",
   "zero_iso_gpu_comparison": "results/experiments/bneck_iso_20261104/zero_iso_gpu_equivalence_audit.json",
   "zero_iso_gpu_max_abs_difference": 0.0,
   "campaign": "results/experiments/bneck_iso_20261104",
   "supervisor_pid": 387799,
-  "admission": "initially waited for unrelated same-account GPU jobs; guard subsequently admitted our two workers"
+  "admission": "initially waited for unrelated same-account GPU jobs; guard subsequently admitted our two workers",
+  "completed_kst": "2026-11-04T23:40:37.980861+09:00",
+  "full_training_runs": 64,
+  "test_evaluations": 24,
+  "all_command_returncodes_zero": true,
+  "source_snapshot_reverified": true,
+  "hypotheses": {
+    "baseline": {
+      "verdict": "\uae30\uac01",
+      "paired_best_deltas": [
+        -0.004139020602669907,
+        -0.015113561211256288,
+        -0.02424858187701917
+      ],
+      "paired_mean": -0.01450038789698179,
+      "paired_sample_sd": 0.010068793363492255
+    },
+    "iso_off": {
+      "verdict": "\ud310\uc815\ubd88\uac00",
+      "paired_best_deltas": [
+        0.020054921534761627,
+        -0.008371744571754602,
+        -0.006808637968666709
+      ],
+      "paired_mean": 0.001624846331446772,
+      "paired_sample_sd": 0.015980036907436573
+    },
+    "aux_off": {
+      "verdict": "\uc131\ub9bd",
+      "paired_best_deltas": [
+        0.024512236144291877,
+        0.01865689820779759,
+        0.016229933607505687
+      ],
+      "paired_mean": 0.01979968931986505,
+      "paired_sample_sd": 0.0042577708336733
+    }
+  }
 }
