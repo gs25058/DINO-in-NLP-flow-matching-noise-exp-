@@ -1,5 +1,10 @@
 # 현재 실험의 학습 방법
 
+실험2의 별도 정의는 [직접256d DINO+iso 명세](docs/experiments/bottleneck_dino/OPTUNA_SPEC.md)다.
+`logit_dim: null`이면 MLP→L2의256d가 DINO logits이며8192 확장은 생성하지 않는다.
+`cov_iso_space: bottleneck`은 같은 EMA iso를256d에서만 계산한다. centering/sharpening은 그대로다.
+아래 기존 수식과 config의 기본 경로는 보존한다.
+
 이 문서는 보존하는 기준선 수식이다. 현재 브랜치의 선택적 추가항은
 [bottleneck cosine 사전 등록](docs/experiments/bottleneck_cosine/OPTUNA_SPEC.md)과
 [bottleneck iso 사전 등록](docs/experiments/bottleneck_iso/OPTUNA_SPEC.md)에 정의한다.

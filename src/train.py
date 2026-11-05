@@ -180,7 +180,7 @@ class Trainer:
         self.objective = DINOObjective(
             loss,
             self.student.backbone.config.hidden_size,
-            model["head"]["logit_dim"],
+            model["head"]["logit_dim"] or model["head"]["bottleneck_dim"],
             model["head"]["bottleneck_dim"],
         ).to(device)
         groups = build_param_groups(
@@ -215,6 +215,14 @@ class Trainer:
         special = enc["special_tokens_mask"].bool().to(self.device) | ~mask.bool()
         token_embeds = self.student.get_input_embeddings()(ids)
         views = self.augment(token_embeds, special, step)
+        if step == 0 and self.cfg["train"].get("record_first_views", False):
+            def fingerprint(tensor):
+                return hashlib.sha256(tensor.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+            (self.run_dir / "first_views.json").write_text(json.dumps({
+                "teacher": fingerprint(views.teacher_embeds),
+                "students": [fingerprint(view) for view in views.student_embeds],
+            }, indent=2) + "\n")
         teacher = self.teacher(inputs_embeds=views.teacher_embeds, attention_mask=mask)
         count = len(views.student_embeds)
         student = self.student(
@@ -271,6 +279,13 @@ class Trainer:
             if self.cfg["eval"].get("bottleneck_geometry", False):
                 mlp = [p for p in self.student.head.mlp.parameters() if p.requires_grad]
                 diagnostics["grad_dino_mlp"] = backbone_grad_norm(losses.dino, mlp)
+                if self.objective.covariance_space == "bottleneck":
+                    for name in ("mean", "cov"):
+                        diagnostics[f"grad_{name}_mlp"] = (
+                            backbone_grad_norm(
+                                getattr(losses, f"lambda_{name}") * getattr(losses, name), mlp
+                            ) if losses.active else 0.0
+                        )
                 diagnostics["grad_bneck_mlp"] = (
                     backbone_grad_norm(losses.lambda_bneck * losses.bneck, mlp)
                     if losses.bneck is not None and losses.lambda_bneck > 0
@@ -324,7 +339,8 @@ class Trainer:
         self.logger.info(f"[step {step}] " + " ".join(f"{k}={v:.6g}" for k, v in log.items()))
 
     def evaluate(self, step):
-        metrics = sts_b_dev_metrics_by_space(self.student, self.tokenizer, self.device, EVAL_SPACES)
+        spaces = EVAL_SPACES if self.student.head.expand is not None else ("embedding", "bottleneck")
+        metrics = sts_b_dev_metrics_by_space(self.student, self.tokenizer, self.device, spaces)
         final = metrics["embedding"]
         geometry = {}
         if getattr(self, "cfg", {}).get("eval", {}).get("bottleneck_geometry", False):
@@ -349,7 +365,7 @@ class Trainer:
                 for key, value in values.items()
             },
         }
-        for space in ("bottleneck", "head"):
+        for space in spaces[1:]:
             row = metrics[space]
             log.update(
                 {
@@ -391,6 +407,7 @@ class Trainer:
                 "train_cfg": self.cfg["train"],
                 "loss_cfg": self.cfg["loss"],
                 "cov_iso_state_dict": self.objective.covariance.state_dict(),
+                "dino_state_dict": self.objective.dino.state_dict(),
                 **(
                     {"bneck_iso_state_dict": self.objective.bneck_covariance.state_dict()}
                     if self.objective.bneck_covariance is not None else {}

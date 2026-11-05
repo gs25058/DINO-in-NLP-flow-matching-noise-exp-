@@ -29,6 +29,8 @@ from src.bottleneck import (
     trial_config,
 )
 from src.provenance import prepare, read_json, sha256_file, verify_source, write_json
+from src.provenance import model_fingerprint
+from src.model import DinoTextModel
 from src.train import Trainer, load_config, setup_logger
 
 
@@ -40,7 +42,7 @@ def set_stage(campaign, stage, **extra):
 def save_config(campaign, manifest, base, label, seed):
     cfg = copy.deepcopy(base)
     protocol = manifest.get("protocol", "bottleneck_cosine")
-    prefix = "bneckiso" if protocol == "bottleneck_iso" else "bneckcos"
+    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino"}.get(protocol, "bneckcos")
     cfg.update(seed=seed, run_name=f"{prefix}_{campaign.name}_{label}_s{seed}")
     for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
         cfg["data"][key] = str(Path(manifest["workspace"]) / cfg["data"][key])
@@ -77,7 +79,7 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
             f"train_{label}_s{seed}",
             command,
             evaluation_path=log / "evaluations.jsonl",
-            expected_initialization=cal["initial_student_sha256"] if seed == SEARCH_SEED else None,
+            expected_initialization=cal.get("initial_student_sha256") if seed == SEARCH_SEED else None,
         )
     metrics = read_json(completion) if smoke else complete_record(completion)
     if smoke and (metrics["status"] != "smoke_complete" or metrics["completed_steps"] != 60):
@@ -91,6 +93,9 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
         "seed": seed,
         "label": label,
         "initial_student_sha256": provenance["initial_student_sha256"],
+        "initial_shared_sha256": provenance.get("initial_shared_sha256", provenance["initial_student_sha256"]),
+        "architecture": cfg["model"]["head"]["logit_dim"],
+        "first_views": read_json(log / "first_views.json") if (log / "first_views.json").exists() else None,
         "batch_order": order,
         "data": provenance["data"],
     }
@@ -98,11 +103,23 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
 
 def audit_runs(campaign, runs, calibration):
     hashes = {}
+    full_hashes = {}
+    first_views = {}
     orders = {}
     data = None
     for run in runs:
         seed = run["seed"]
-        fingerprint = run["initial_student_sha256"]
+        fingerprint = run.get("initial_shared_sha256", run["initial_student_sha256"])
+        expected = calibration.get("expected_shared_initial_sha256", {}).get(str(seed))
+        if expected is not None and fingerprint != expected:
+            raise RuntimeError("shared initialization differs from the measured fixed baseline")
+        architecture = f"{seed}_{run.get('architecture', 'same')}"
+        full = run["initial_student_sha256"]
+        if full_hashes.setdefault(architecture, full) != full:
+            raise RuntimeError("unequal initialization within the same architecture and seed")
+        if run.get("first_views") is not None:
+            if first_views.setdefault(seed, run["first_views"]) != run["first_views"]:
+                raise RuntimeError("unequal initial noisy views within seed")
         order = run["batch_order"]["sha256"]
         if hashes.setdefault(seed, fingerprint) != fingerprint:
             raise RuntimeError("unequal pretrained initialization within seed")
@@ -115,6 +132,7 @@ def audit_runs(campaign, runs, calibration):
             raise RuntimeError("training data changed between runs")
         if (
             seed == SEARCH_SEED
+            and "first_indices" in calibration
             and run["batch_order"]["first_indices"] != calibration["first_indices"]
         ):
             raise RuntimeError("calibration minibatch differs from training")
@@ -124,6 +142,9 @@ def audit_runs(campaign, runs, calibration):
             "same_initialization_per_seed": True,
             "same_data_order_per_seed": True,
             "initial_sha256": hashes,
+            "initial_hash_scope": "shared backbone and MLP; full architecture hashes checked separately",
+            "full_initial_sha256": full_hashes,
+            "first_views": first_views,
             "batch_order_sha256": orders,
             "data_sha256": data,
         },
@@ -133,7 +154,8 @@ def audit_runs(campaign, runs, calibration):
 def search(campaign, manifest, base, calibration, children):
     studies = {}
     all_runs = []
-    for arm in ARMS:
+    arms = manifest.get("search_arms", ARMS)
+    for arm in arms:
         study = optuna.create_study(
             storage=f"sqlite:///{campaign / f'{arm}.db'}",
             study_name=f"{campaign.name}_{arm}",
@@ -150,7 +172,7 @@ def search(campaign, manifest, base, calibration, children):
         studies[arm] = study
     for number in range(manifest["trials_per_arm"]):
         pending = {}
-        for arm in ARMS:
+        for arm in arms:
             trial = studies[arm].ask()
             pending[arm] = (trial, trial_config(trial, base, arm, calibration))
 
@@ -175,7 +197,7 @@ def search(campaign, manifest, base, calibration, children):
             )
 
         try:
-            parallel_jobs(ARMS, manifest["gpus"], children, execute, completed)
+            parallel_jobs(arms, manifest["gpus"], children, execute, completed)
         except BaseException:
             for arm, (trial, _) in pending.items():
                 if studies[arm].trials[trial.number].state == TrialState.RUNNING:
@@ -185,15 +207,16 @@ def search(campaign, manifest, base, calibration, children):
 
 
 def confirm(campaign, manifest, studies, children, calibration):
-    shortlist = {arm: [t.number for t in top_trials(studies[arm])] for arm in ARMS}
+    arms = tuple(studies)
+    shortlist = {arm: [t.number for t in top_trials(studies[arm])] for arm in arms}
     if any(len(ids) != 3 for ids in shortlist.values()):
         raise RuntimeError("three completed candidates required per arm")
     write_json(
         campaign / "shortlist.json",
         {"trials": shortlist, "new_seeds": CONFIRM_SEEDS, "test_scores_seen": False},
     )
-    confirmed = {arm: {str(n): {} for n in shortlist[arm]} for arm in ARMS}
-    jobs = [(arm, n, seed) for arm in ARMS for n in shortlist[arm] for seed in CONFIRM_SEEDS]
+    confirmed = {arm: {str(n): {} for n in shortlist[arm]} for arm in arms}
+    jobs = [(arm, n, seed) for arm in arms for n in shortlist[arm] for seed in CONFIRM_SEEDS]
 
     def execute(gpu, job):
         arm, n, seed = job
@@ -216,7 +239,7 @@ def confirm(campaign, manifest, studies, children, calibration):
                 n,
             ),
         )
-        for arm in ARMS
+        for arm in arms
     }
     selection = {
         "selected_trials": selected,
@@ -271,6 +294,7 @@ def evaluate(campaign, manifest, groups, children):
     jobs = [
         (group, seed, which)
         for group in groups
+        if group not in manifest.get("reference_groups", [])
         for seed in CONFIRM_SEEDS
         for which in ("best", "last")
     ]
@@ -314,6 +338,77 @@ def evaluate(campaign, manifest, groups, children):
     parallel_jobs(jobs, manifest["gpus"], children, execute, lambda *_: render(campaign))
 
 
+def fixed_baseline(campaign, manifest, base):
+    """Verify and import measured reference scores, never retune or rewrite them."""
+    previous = Path(manifest["reference_baseline_campaign"])
+    old = read_json(previous / "source_manifest.json")
+    verify_source(previous, old)
+    baseline = read_json(previous / "final_runs.json")["baseline"]
+    expected_shared = {}
+    for seed in (SEARCH_SEED, *CONFIRM_SEEDS):
+        if seed == SEARCH_SEED:
+            configs = sorted((previous / "configs").glob("search_baseline_t0_s42.yaml"))
+            if len(configs) != 1:
+                raise RuntimeError("reference seed42 initialization record missing")
+            cfg = load_config(configs[0])
+            log = previous / "results/logs" / cfg["run_name"]
+            run = None
+        else:
+            run = baseline[str(seed)]
+            cfg = load_config(run["config"])
+            log = previous / "results/logs" / run["run_name"]
+        complete_record(log / "completion.json")
+        prov = read_json(log / "provenance.json")
+        if load_config(log / "resolved.yaml") != cfg:
+            raise RuntimeError("reference config differs from its recorded resolved config")
+        if cfg["augment"] != base["augment"] or cfg["model"] != base["model"]:
+            raise RuntimeError("reference noise/model differs from the declared fixed baseline")
+        fixed = {
+            "train": ("batch_size", "max_steps", "weight_decay", "warmup_frac", "grad_clip",
+                      "momentum_start", "momentum_end", "momentum_ramp_frac", "tf32"),
+            "loss": ("center_momentum", "cov_ema_momentum", "cov_iso_start_step", "teacher_temp_warmup_frac"),
+            "data": ("max_tokens",),
+            "eval": ("every_steps", "log_every_steps", "batch_kl_pairs"),
+        }
+        if any(cfg[section][key] != base[section][key] for section, keys in fixed.items() for key in keys):
+            raise RuntimeError("fixed reference training/evaluation protocol differs")
+        for key, item in prov["data"].items():
+            current = Path(manifest["workspace"]) / base["data"][key]
+            if sha256_file(current) != item["sha256"]:
+                raise RuntimeError("reference data differs from current data")
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            initial = DinoTextModel(cfg["model"]["backbone"], 256, 8192)
+            if model_fingerprint(initial) != prov["initial_student_sha256"]:
+                raise RuntimeError("reference initial model cannot be reconstructed exactly")
+            expected_shared[str(seed)] = model_fingerprint(initial, ("head.expand.",))
+            del initial
+        if run is None:
+            continue
+        for target in ("results/logs", "checkpoints"):
+            dest = campaign / target / run["run_name"]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.symlink_to(previous / target / run["run_name"], target_is_directory=True)
+        for which in ("best", "last"):
+            source = previous / "results/analysis" / f"baseline_s{seed}_{which}.json"
+            doc = read_json(source)
+            doc["reference"] = {"campaign": str(previous), "copied_without_reevaluation": True}
+            write_json(campaign / "results/analysis" / source.name, doc)
+    write_json(campaign / "fixed_baseline.json", {
+        "source_campaign": str(previous), "source_commit": old["git"]["commit"],
+        "selected_by_previous_dev": read_json(previous / "selection.json"),
+        "expected_shared_initial_sha256": expected_shared,
+        "runs": baseline, "retuned": False, "prior_test_scores_already_known": True,
+    })
+    identities = read_json(previous / "evaluation_data_identity.json")
+    for dataset in identities["datasets"].values():
+        for cache in dataset["cache_files"]:
+            if sha256_file(cache["path"]) != cache["sha256"]:
+                raise RuntimeError("reference evaluation data changed")
+    write_json(campaign / "evaluation_data_identity.json", identities)
+    return baseline
+
+
 def run(campaign, manifest):
     env = dict(
         os.environ,
@@ -335,31 +430,33 @@ def run(campaign, manifest):
     signal.signal(signal.SIGINT, stop)
     protocol = manifest.get("protocol", "bottleneck_cosine")
     base = load_config(campaign / "source/configs" / protocol / "base.yaml")
+    direct = protocol == "bottleneck_dino"
     stage = "calibration"
     try:
-        set_stage(campaign, stage)
-        path, _ = save_config(campaign, manifest, base, "calibration", SEARCH_SEED)
-        children.run(
-            manifest["gpus"][0],
-            "calibration",
-            [
-                sys.executable,
-                "scripts/run_bottleneck.py",
-                "--campaign",
-                str(campaign),
-                "--calibration-child",
-                "--config",
-                str(path),
-            ],
-        )
+        if direct:
+            stage = "reference_verification"
+            set_stage(campaign, stage)
+            reference = fixed_baseline(campaign, manifest, base)
+            # Iso is tuned directly; the existing FlowDINO reference stays fixed.
+            write_json(campaign / "calibration.json", {
+                "not_used": "No cosine auxiliary; direct DINO tunes iso in the preregistered [1e-3,10] log range.",
+                "expected_shared_initial_sha256": read_json(campaign / "fixed_baseline.json")["expected_shared_initial_sha256"],
+            })
+        else:
+            set_stage(campaign, stage)
+            path, _ = save_config(campaign, manifest, base, "calibration", SEARCH_SEED)
+            children.run(
+                manifest["gpus"][0], "calibration",
+                [sys.executable, "scripts/run_bottleneck.py", "--campaign", str(campaign),
+                 "--calibration-child", "--config", str(path)],
+            )
         calibration = read_json(campaign / "calibration.json")
         write_json(
             campaign / "search_registration.json",
             {
                 "registered_before_training_unix": time.time(),
                 "common_space": common_space(base),
-                "lambda_range": calibration["lambda_range"],
-                "lambda_anchor": calibration["lambda_anchor"],
+                **{key: calibration[key] for key in ("lambda_range", "lambda_anchor") if key in calibration},
                 **{key: value for key, value in calibration.items() if key.startswith("iso_lambda_")},
                 "trials_per_arm": manifest["trials_per_arm"],
                 "steps": 4000,
@@ -374,6 +471,14 @@ def run(campaign, manifest):
         set_stage(campaign, stage)
 
         def smoke(gpu, arm):
+            if direct:
+                cfg = trial_config(
+                    optuna.trial.FixedTrial(anchor_parameters(base, arm, calibration)),
+                    base, arm, calibration,
+                )
+                return execute_train(
+                    campaign, manifest, children, gpu, cfg, f"smoke_{arm}", SEARCH_SEED, smoke=True
+                )
             cfg = copy.deepcopy(base)
             cfg["loss"]["bneck_cosine_lambda"] = (
                 calibration["lambda_anchor"] if arm == "bottleneck" else 0.0
@@ -402,9 +507,14 @@ def run(campaign, manifest):
         stage = "confirmation"
         set_stage(campaign, stage)
         groups, confirmed = confirm(campaign, manifest, studies, children, calibration)
-        stage = "aux_off"
-        set_stage(campaign, stage)
-        off = ablate(campaign, manifest, groups, children)
+        if direct:
+            groups["baseline"] = reference
+            write_json(campaign / "final_runs.json", groups)
+        off = []
+        if not direct:
+            stage = "aux_off"
+            set_stage(campaign, stage)
+            off = ablate(campaign, manifest, groups, children)
         audit_runs(campaign, runs + confirmed + off, calibration)
         stage = "test_evaluation"
         set_stage(campaign, stage)
@@ -427,8 +537,13 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--calibration-child", action="store_true")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--with-bneck-iso", action="store_true",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--with-bneck-iso", action="store_true",
                         help="joint cosine + 256d isotropy protocol, with iso-off confirmation")
+    mode.add_argument("--direct-bottleneck-dino", action="store_true",
+                      help="tune direct256 DINO+iso against the fixed, already-tuned FlowDINO reference")
+    parser.add_argument("--reference-baseline", type=Path,
+                        default=ROOT / "results/experiments/bneck_iso_20261104")
     args = parser.parse_args()
     campaign = args.campaign.resolve()
     if args.calibration_child:
@@ -465,7 +580,10 @@ def main():
         parser.error("3–20 trials per arm required")
     if args.trials_per_arm != 20 and not args.budget_reason.strip():
         parser.error("reduced equal budget requires a reason before starting")
-    protocol = "bottleneck_iso" if args.with_bneck_iso else "bottleneck_cosine"
+    protocol = (
+        "bottleneck_dino" if args.direct_bottleneck_dino else
+        "bottleneck_iso" if args.with_bneck_iso else "bottleneck_cosine"
+    )
     manifest = prepare(
         campaign,
         ROOT,
@@ -482,6 +600,11 @@ def main():
         protocol=protocol,
         initial_workspace_branch=manifest["git"]["branch"],
     )
+    if args.direct_bottleneck_dino:
+        manifest.update(
+            search_arms=["bottleneck"], reference_groups=["baseline"],
+            reference_baseline_campaign=str(args.reference_baseline.resolve()),
+        )
     write_json(campaign / "source_manifest.json", manifest)
     if not args.prepare_only:
         os.execv(

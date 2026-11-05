@@ -1,6 +1,10 @@
 # FlowDINO
 
-현재 브랜치의 추가 실험은 **256d bottleneck cosine + isotropy 보조 손실**이다.
+현재 추가하는 실험2는 **256d bottleneck의 DINO CE+iso**다.8192 확장을 생성하지 않고,
+teacher256d center·sharpening을 유지한다. 이미 튜닝된 FlowDINO 기준선은 고정하고
+새 구조만20 trial로 튜닝한다. [실험2 실행 안내](docs/experiments/bottleneck_dino/README.md)를 따른다.
+
+완료한 실험1은 **256d bottleneck cosine + isotropy 보조 손실**이다.
 [실행 안내](docs/experiments/bottleneck_iso/README.md)와
 [사전 등록](docs/experiments/bottleneck_iso/OPTUNA_SPEC.md)을 따른다.
 기존 DINO CE·768d covariance·noise를 유지하고, 양쪽20trial×4000step으로 LR/head LR/teacher 온도를

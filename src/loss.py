@@ -157,7 +157,13 @@ class DINOObjective(nn.Module):
     def __init__(self, cfg, embed_dim, logit_dim, bottleneck_dim=None):
         super().__init__()
         self.dino = DINOLoss(logit_dim, cfg["center_momentum"])
-        self.covariance = CovIsoPenalty(embed_dim, cfg["cov_ema_momentum"])
+        self.covariance_space = cfg.get("cov_iso_space", "embedding")
+        if self.covariance_space not in ("embedding", "bottleneck"):
+            raise ValueError("cov_iso_space must be embedding or bottleneck")
+        if self.covariance_space == "bottleneck" and bottleneck_dim is None:
+            raise ValueError("bottleneck_dim is required for bottleneck covariance")
+        covariance_dim = bottleneck_dim if self.covariance_space == "bottleneck" else embed_dim
+        self.covariance = CovIsoPenalty(covariance_dim, cfg["cov_ema_momentum"])
         self.mean_weight, self.cov_weight = (
             float(cfg[f"cov_iso_{name}_lambda"]) for name in ("mean", "cov")
         )
@@ -195,7 +201,12 @@ class DINOObjective(nn.Module):
         teacher_bottleneck=None,
         student_bottlenecks=None,
     ) -> LossTerms:
-        terms = [self.covariance(z) for z in student_embeddings]
+        regularized = (
+            student_bottlenecks if self.covariance_space == "bottleneck" else student_embeddings
+        )
+        if regularized is None:
+            raise ValueError("bottleneck covariance requires cached student bottlenecks")
+        terms = [self.covariance(z) for z in regularized]
         dino, diagnostics = self.dino(
             teacher_logits, student_logits, teacher_temp, self.student_temp
         )

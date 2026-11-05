@@ -49,11 +49,11 @@ class Backbone(nn.Module):
         return SimpleNamespace(last_hidden_state=self.linear(inputs_embeds))
 
 
-def model():
+def model(logit_dim=13):
     result = DinoTextModel.__new__(DinoTextModel)
     nn.Module.__init__(result)
     result.backbone = Backbone()
-    result.head = DINOHead(8, 256, 13)
+    result.head = DINOHead(8, 256, logit_dim)
     return result
 
 
@@ -250,15 +250,16 @@ def read_json_lines(path):
     return read_records(path)
 
 
-@pytest.mark.parametrize("with_iso", [False, True])
+@pytest.mark.parametrize("protocol", ["bottleneck_cosine", "bottleneck_iso", "bottleneck_dino"])
 def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_off(
-    tmp_path, monkeypatch, with_iso
+    tmp_path, monkeypatch, protocol
 ):
     from scripts import run_bottleneck as pipeline
 
     campaign = tmp_path / "campaign"
     workspace = tmp_path / "workspace"
-    protocol = "bottleneck_iso" if with_iso else "bottleneck_cosine"
+    with_iso = protocol == "bottleneck_iso"
+    direct = protocol == "bottleneck_dino"
     manifest = prepare(
         campaign,
         pipeline.ROOT,
@@ -272,6 +273,31 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
         trials_per_arm=3,
         common_space=common_space(load_config(f"configs/{protocol}/base.yaml")),
     )
+    if direct:
+        manifest.update(search_arms=["bottleneck"], reference_groups=["baseline"])
+
+        def reference(campaign, manifest, base):
+            runs = {}
+            for seed in CONFIRM_SEEDS:
+                name = f"fixed_baseline_{seed}"
+                runs[str(seed)] = {
+                    "run_name": name,
+                    "metrics": {"best_sts": 0.73, "last_sts": 0.729},
+                }
+                for which in ("best", "last"):
+                    write_json(campaign / "results/analysis" / f"baseline_s{seed}_{which}.json", {
+                        "experiment": {"group": "baseline", "seed": seed, "which": which},
+                        "runs": {name: {"avg_7task": 0.7}},
+                        "bottleneck_diagnostic": {name: {"avg_7task": 0.5}},
+                    })
+            write_json(campaign / "fixed_baseline.json", {
+                "expected_shared_initial_sha256": {
+                    str(seed): f"init{seed}" for seed in (42, *CONFIRM_SEEDS)
+                },
+            })
+            return runs
+
+        monkeypatch.setattr(pipeline, "fixed_baseline", reference)
     write_json(campaign / "source_manifest.json", manifest)
     calls = []
 
@@ -300,7 +326,7 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
             steps = 60 if "--stop-after-steps" in command else 4000
             log = campaign / "results/logs" / cfg["run_name"]
             log.mkdir(parents=True)
-            score = 0.73 + (0.01 if cfg["loss"]["bneck_cosine_lambda"] else 0) + seed * 1e-6
+            score = 0.73 + (0.01 if cfg["loss"].get("bneck_cosine_lambda") else 0) + seed * 1e-6
             write_json(
                 log / "completion.json",
                 {
@@ -327,7 +353,8 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
             append_record(log / "components.jsonl", {"loop_step": steps - 1, "bneck_cosine": 0.9})
         else:
             assert (campaign / "selection.json").exists()
-            assert "aux_off" in read_json(campaign / "final_runs.json")
+            if not direct:
+                assert "aux_off" in read_json(campaign / "final_runs.json")
             if with_iso:
                 assert "iso_off" in read_json(campaign / "final_runs.json")
             name = command[command.index("--runs") + 1]
@@ -348,7 +375,7 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
     assert read_json(campaign / "state.json")["stage"] == "complete"
-    for arm in ARMS:
+    for arm in manifest.get("search_arms", ARMS):
         study = optuna.load_study(
             study_name=f"{campaign.name}_{arm}", storage=f"sqlite:///{campaign / f'{arm}.db'}"
         )
@@ -357,16 +384,19 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
             study.trials[0].params["train.lr"]
             == load_config(f"configs/{protocol}/base.yaml")["train"]["lr"]
         )
-    assert sum(x.startswith("train_confirm_") for x in calls) == 18
-    assert sum(x.startswith("train_aux_off_") for x in calls) == 3
+    assert sum(x.startswith("train_confirm_") for x in calls) == (9 if direct else 18)
+    assert sum(x.startswith("train_aux_off_") for x in calls) == (0 if direct else 3)
     assert sum(x.startswith("train_iso_off_") for x in calls) == (3 if with_iso else 0)
-    assert sum(x.startswith("eval_") for x in calls) == (24 if with_iso else 18)
+    assert sum(x.startswith("eval_") for x in calls) == (6 if direct else 24 if with_iso else 18)
+    if direct:
+        assert not (campaign / "baseline.db").exists()
+        assert not any(x.startswith("train_search_baseline") for x in calls)
     conclusions = [
         line
         for line in (campaign / "report.md").read_text().splitlines()
         if line.startswith("**주 평가:")
     ]
-    assert len(conclusions) == (3 if with_iso else 2)
+    assert len(conclusions) == (1 if direct else 3 if with_iso else 2)
     assert all("'verdict': '기각'" in line for line in conclusions)
 
 
@@ -461,3 +491,85 @@ def test_geometry_distinguishes_concentration_and_centered_rank():
     collapsed = representation_geometry(torch.tensor([[1., 0.]]).repeat(4, 1))
     assert collapsed["effective_rank"] == 0 and collapsed["max_sv_ratio"] == 0
     assert collapsed["mean_norm"] == 1 and collapsed["mean_pair_cosine"] == 1
+
+
+def test_direct_dino_uses_256_center_sharpening_and_only_bottleneck_covariance():
+    torch.manual_seed(42)
+    cfg = load_config("configs/bottleneck_dino/direct.yaml")
+    student = model(None)
+    teacher = EMATeacher(student, 0.997)
+    objective = DINOObjective(cfg["loss"], 8, 256, 256)
+    assert student.head.expand is None and teacher.model.head.expand is None
+    assert not any("expand" in key for key in student.state_dict())
+    assert objective.covariance.mu_ema.shape == (256,) and objective.bneck_covariance is None
+    assert objective.dino.center.shape == (256,)
+    old_center = torch.linspace(-0.03, 0.03, 256)
+    objective.dino.center.copy_(old_center)
+    x, mask = torch.randn(4, 3, 8), torch.ones(4, 3)
+    target = teacher(x, mask)
+    outputs = [student(x + torch.randn_like(x) * scale, mask) for scale in (0.2, 0.4, 0.8)]
+    for out in outputs:
+        assert out.logits is out.bottleneck
+        out.embedding.retain_grad()
+    calls = []
+    handle = objective.covariance.register_forward_hook(lambda *_: calls.append(1))
+    loss = objective(
+        target.logits, [o.embedding for o in outputs], [o.logits for o in outputs], 56, 0.04,
+        teacher_bottleneck=target.bottleneck, student_bottlenecks=[o.bottleneck for o in outputs],
+    )
+    probability = torch.softmax((target.bottleneck - old_center) / 0.04, dim=-1)
+    expected_ce = torch.stack([
+        -(probability * torch.log_softmax(o.bottleneck / cfg["loss"]["student_temp"], dim=-1)).sum(-1).mean()
+        for o in outputs
+    ]).mean()
+    assert torch.equal(loss.dino, expected_ce)
+    torch.testing.assert_close(
+        objective.dino.center,
+        0.92 * old_center + 0.08 * target.bottleneck.mean(dim=0),
+    )
+    assert len(calls) == 3 and loss.bneck is None and loss.bneck_iso is None
+    loss.total.backward()
+    assert all(o.embedding.grad is None for o in outputs)
+    assert all(p.grad is None for p in teacher.model.parameters())
+    assert any(p.grad is not None and p.grad.norm() > 0 for p in student.backbone.parameters())
+    assert all(p.grad is not None and p.grad.norm() > 0 for p in student.head.mlp.parameters())
+    handle.remove()
+
+
+def test_direct_search_tunes_temperatures_and_iso_instead_of_reusing_auxiliary_weights():
+    base = load_config("configs/bottleneck_dino/base.yaml")
+    point = anchor_parameters(base, "bottleneck", {})
+    cfg = trial_config(optuna.trial.FixedTrial(point), base, "bottleneck", {})
+    assert cfg["model"]["head"]["logit_dim"] is None
+    assert cfg["loss"]["cov_iso_space"] == "bottleneck"
+    assert cfg["loss"]["teacher_temp"] == pytest.approx(base["loss"]["teacher_temp"])
+    assert cfg["loss"]["cov_iso_mean_lambda"] == cfg["loss"]["cov_iso_cov_lambda"] == 5.874093568592943
+    assert "bneck_cosine_lambda" not in cfg["loss"] and "bneck_iso_lambda" not in cfg["loss"]
+    assert set(point) == {"train.lr", "train.head_lr", "loss.student_temp", "loss.teacher_temp_ratio", "loss.cov_iso_mean_lambda"}
+    point.update({"loss.student_temp": 0.1, "loss.teacher_temp_ratio": 0.2, "loss.cov_iso_mean_lambda": 0.01})
+    changed = trial_config(optuna.trial.FixedTrial(point), base, "bottleneck", {})
+    assert changed["loss"]["teacher_temp"] == pytest.approx(0.02)
+    assert changed["loss"]["warmup_teacher_temp"] == pytest.approx(0.02)
+    assert changed["loss"]["cov_iso_cov_lambda"] == 0.01
+    assert changed["augment"] == base["augment"]
+
+
+def test_direct_checkpoint_saves_center_and_loads_without_prototypes(tmp_path, monkeypatch):
+    from scripts import eval_sts7
+
+    trainer = Trainer.__new__(Trainer)
+    trainer.cfg = load_config("configs/bottleneck_dino/direct.yaml")
+    trainer.root = tmp_path
+    trainer.student = model(None)
+    trainer.teacher = EMATeacher(trainer.student, 0.997)
+    trainer.objective = DINOObjective(trainer.cfg["loss"], 8, 256, 256)
+    trainer.objective.dino.center.fill_(0.25)
+    trainer.best_step, trainer.best_sts = 56, 0.7
+    trainer.save_checkpoint("last", 59, 0.69)
+    saved = torch.load(tmp_path / "checkpoints" / trainer.cfg["run_name"] / "last.pt", weights_only=True)
+    assert torch.equal(saved["dino_state_dict"]["center"], torch.full((256,), 0.25))
+    assert saved["cov_iso_state_dict"]["m2_ema"].shape == (256, 256)
+    monkeypatch.setattr(eval_sts7, "DinoTextModel", lambda *_: model(None))
+    loaded = eval_sts7.load_eval_model(saved, "cpu")
+    assert loaded.head.expand is None and not loaded.training
+    assert all(torch.equal(v, loaded.state_dict()[k]) for k, v in saved["state_dict"].items())

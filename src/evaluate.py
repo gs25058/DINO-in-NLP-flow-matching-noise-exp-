@@ -55,6 +55,8 @@ def encode_sentences(
             if "bottleneck" in spaces:
                 representations["bottleneck"] = output.bottleneck
             if "head" in spaces:
+                if getattr(model.head, "expand", True) is None:
+                    raise ValueError("prototype head evaluation is unavailable without expansion")
                 representations["head"] = F.normalize(output.logits, p=2, dim=-1)
             for space in spaces:
                 chunks[space].append(representations[space].cpu())

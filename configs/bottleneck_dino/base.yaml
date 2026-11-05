@@ -1,0 +1,8 @@
+extends: ../coviso_relax/base.yaml
+protocol: bottleneck_dino
+run_name: direct_bneck_dino_s42
+train:
+  record_batch_order: true
+  record_first_views: true
+eval:
+  bottleneck_geometry: true

@@ -21,9 +21,11 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def model_fingerprint(model):
+def model_fingerprint(model, exclude_prefixes=()):
     digest = hashlib.sha256()
     for name, tensor in model.state_dict().items():
+        if name.startswith(exclude_prefixes):
+            continue
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
@@ -65,6 +67,7 @@ def record_run(root, cfg, student, device, argv):
         "command": argv,
         "device": str(device),
         "initial_student_sha256": model_fingerprint(student),
+        "initial_shared_sha256": model_fingerprint(student, ("head.expand.",)),
         "data": data,
         "python": platform.python_version(),
         "libraries": {

@@ -1,0 +1,12 @@
+{
+  "before_tests": 84,
+  "after_tests": 88,
+  "gpu_smoke": "not run",
+  "training": "not run",
+  "zero_regression": "existing tiny-BERT loss/output/gradient/EMA/RNG fixtures remain bit-identical",
+  "direct_objective": "256d logits reused without prototypes; previous center and teacher/student temperatures match explicit CE; covariance only256d;3updates; no teacher or768d loss gradients",
+  "checkpoint": "center256 and covariance256 saved; strict model loading without expansion",
+  "pipeline": "synthetic3-trial test: baseline not searched,9 confirmations,6 new test calls after selection, old baseline test imported",
+  "fixed_reference": "CPU initialization-only verification succeeded for seeds42/101/102/103; previous full model hashes reproduced exactly; source/data hashes checked",
+  "fixed_reference_probe_log": "/tmp/flowdino-direct-reference-probe.log"
+}

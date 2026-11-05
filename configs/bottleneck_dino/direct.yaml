@@ -1,0 +1,9 @@
+extends: base.yaml
+run_name: direct_bneck_dino_anchor_s42
+model:
+  backbone: bert-base-uncased
+  head:
+    logit_dim: null
+    bottleneck_dim: 256
+loss:
+  cov_iso_space: bottleneck

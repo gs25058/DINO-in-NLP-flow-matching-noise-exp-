@@ -21,20 +21,24 @@ class HeadOutput:
 
 
 class DINOHead(nn.Module):
-    """MLP bottleneck → L2 normalization → weight-normalized prototypes."""
+    """Normalized MLP bottleneck, optionally expanded to learned prototypes."""
 
     def __init__(self, in_dim, bottleneck_dim, logit_dim):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, bottleneck_dim)
         )
-        self.expand = nn.utils.parametrizations.weight_norm(
-            nn.Linear(bottleneck_dim, logit_dim, bias=False)
+        self.expand = (
+            nn.utils.parametrizations.weight_norm(nn.Linear(bottleneck_dim, logit_dim, bias=False))
+            if logit_dim is not None
+            else None
         )
 
     def forward(self, pooled):
         bottleneck = F.normalize(self.mlp(pooled), p=2, dim=-1)
-        return HeadOutput(self.expand(bottleneck), bottleneck)
+        # With no prototypes the normalized bottleneck itself supplies DINO logits.
+        logits = self.expand(bottleneck) if self.expand is not None else bottleneck
+        return HeadOutput(logits, bottleneck)
 
 
 @dataclass

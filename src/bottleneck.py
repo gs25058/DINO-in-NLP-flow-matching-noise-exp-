@@ -18,6 +18,14 @@ SAMPLER_SEED = 20261104
 
 
 def common_space(base):
+    if base.get("protocol") == "bottleneck_dino":
+        return {
+            "train.lr": (base["train"]["lr"] * 0.5, base["train"]["lr"] * 2.0, True),
+            "train.head_lr": (base["train"]["head_lr"] * 0.5, base["train"]["head_lr"] * 2.0, True),
+            "loss.student_temp": (base["loss"]["student_temp"] * 0.5, base["loss"]["student_temp"] * 2.0, True),
+            "loss.teacher_temp_ratio": (0.1, 0.99, True),
+            "loss.cov_iso_mean_lambda": (1e-3, 10.0, True),
+        }
     return {
         "train.lr": (base["train"]["lr"] * 0.5, base["train"]["lr"] * 2.0, True),
         "train.head_lr": (base["train"]["head_lr"] * 0.5, base["train"]["head_lr"] * 2.0, True),
@@ -26,6 +34,13 @@ def common_space(base):
 
 
 def anchor_parameters(base, arm, calibration):
+    if base.get("protocol") == "bottleneck_dino":
+        return {
+            key: (base["loss"]["teacher_temp"] / base["loss"]["student_temp"]
+                  if key == "loss.teacher_temp_ratio" else base[section][name])
+            for key in common_space(base)
+            for section, name in (key.split("."),)
+        }
     point = {
         key: float(base[section][name])
         for key in common_space(base)
@@ -43,6 +58,16 @@ def trial_config(trial, base, arm, calibration):
     for key, (low, high, log) in common_space(base).items():
         section, name = key.split(".")
         cfg[section][name] = trial.suggest_float(key, low, high, log=log)
+    if base.get("protocol") == "bottleneck_dino":
+        cfg["loss"]["teacher_temp"] = cfg["loss"].pop("teacher_temp_ratio") * cfg["loss"]["student_temp"]
+        cfg["loss"]["warmup_teacher_temp"] = min(
+            base["loss"]["warmup_teacher_temp"], cfg["loss"]["teacher_temp"]
+        )
+        cfg["loss"]["cov_iso_cov_lambda"] = cfg["loss"]["cov_iso_mean_lambda"]
+        if arm == "bottleneck":
+            cfg["model"]["head"]["logit_dim"] = None
+            cfg["loss"]["cov_iso_space"] = "bottleneck"
+        return cfg
     cfg["loss"]["bneck_cosine_lambda"] = (
         trial.suggest_float("loss.bneck_cosine_lambda", *calibration["lambda_range"], log=True)
         if arm == "bottleneck"

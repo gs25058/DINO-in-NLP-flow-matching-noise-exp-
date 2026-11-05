@@ -42,23 +42,39 @@ def render(campaign):
     manifest = read_json(campaign / "source_manifest.json")
     state = read_json(campaign / "state.json")
     iso = manifest.get("protocol") == "bottleneck_iso"
-    comparisons = ("baseline", "aux_off", "iso_off") if iso else ("baseline", "aux_off")
+    direct = manifest.get("protocol") == "bottleneck_dino"
+    comparisons = ("baseline",) if direct else ("baseline", "aux_off", "iso_off") if iso else ("baseline", "aux_off")
     lines = [
+        "# Direct 256d DINO + isotropy — 최적화된 FlowDINO 기준선과 비교" if direct else
         "# Bottleneck cosine + isotropy — 공정한 공동 튜닝 비교" if iso
         else "# Bottleneck cosine — 공정한 공동 튜닝 비교",
         "",
         f"상태: **{state['stage']}**.",
         f"campaign: `{campaign}`. 실행 소스 `{manifest['git']['commit']}`, `{manifest['git']['branch']}`.",
-        "R18 실제 4000-step 대조군을 사용한다. covariance와 noise는 양쪽에서 고정한다.",
-        f"각 조건 {manifest['trials_per_arm']} trial ×4000 step; pruning 없음. 재검증 seed101/102/103.",
+        ("이미 튜닝된 FlowDINO 기준선을 고정하고 직접256d DINO+iso의 온도·iso 가중치 등을 새로 튜닝한다."
+         if direct else "R18 실제 4000-step 대조군을 사용한다. covariance와 noise는 양쪽에서 고정한다."),
+        (f"직접256d 조건 {manifest['trials_per_arm']} trial ×4000 step; FlowDINO 재탐색 없음."
+         if direct else f"각 조건 {manifest['trials_per_arm']} trial ×4000 step;")
+        + " pruning 없음. 재검증 seed101/102/103.",
         "768차원 STS-B dev로 선택하고, 동결 후 768차원 STS7으로 판정한다. 256차원은 진단이다.",
         "",
         "전체 명령·exit code: commands/와 status/. resolved config: configs/. 소스 diff와 SHA: source_manifest.json, source_diff.patch.",
         f"실행기: `{' '.join(manifest.get('launch_argv', []))}`",
         "",
     ]
+    if direct:
+        lines += [
+            f"공통 탐색 범위: `{manifest['common_space']}`.",
+            "teacher T = student T × ratio; warmup initial T = min(R18 initial T, final T).",
+            "256d clean teacher에 이전256d center를 빼고 온도로 sharpen한 target을 사용한다.",
+            "직접 조건에는8192 확장·cosine·768d iso가 없고 DINO CE와256d iso만 있다.",
+            "기준선은 이전 campaign의 선택 config와3시드 평가를 해시 검증 후 가져온다. 새 탐색에 포함하지 않는다.",
+            "미튜닝 성분 제거 점수로 구조의 최적 성능을 대신하지 않는다.",
+            "진단 표의 weighted iso는 해당 run의 regularization 공간(고정 기준선768d, 직접 조건256d)을 뜻한다.",
+            "",
+        ]
     calibration = campaign / "calibration.json"
-    if calibration.exists():
+    if calibration.exists() and not direct:
         cal = read_json(calibration)
         lines += [
             "## 탐색 공간과 보정",
@@ -124,7 +140,7 @@ def render(campaign):
     if final.exists():
         groups = read_json(final)
         lines += [
-            "## 최종 설정과 λ=0 비교",
+            "## 튜닝 후 최종 설정과 고정 기준선" if direct else "## 최종 설정과 λ=0 비교",
             "",
             "| group | seed | 768 dev best | last |",
             "|---|---|---|",
@@ -137,6 +153,8 @@ def render(campaign):
             lines.append(
                 f"\n{group}: mean {statistics.mean(vals):.6f}, sample SD {statistics.stdev(vals):.6f}.\n"
             )
+        if direct and "baseline" in groups:
+            lines += ["", f"dev 차이: `{paired_judgment(groups['baseline'], groups['bottleneck'])}`."]
         if "aux_off" in groups:
             lines += [
                 "",
@@ -148,7 +166,7 @@ def render(campaign):
                 "",
                 f"dev 차이, cosine 유지·iso만 제거: `{paired_judgment(groups['iso_off'], groups['bottleneck'])}`.",
             ]
-    if iso:
+    if iso or direct:
         lines += [
             "", "## 마지막 관측 진단 (선택에 사용하지 않음)", "",
             "| run | step | 256 rank | 256 mean norm | 256 uniformity | view cosine | weighted iso mean/cov |",
@@ -163,8 +181,9 @@ def render(campaign):
             lines.append(
                 f"| {logdir.name} | {row['loop_step']} | {row.get('effective_rank_bottleneck', '')} | "
                 f"{row.get('mean_norm_bottleneck', '')} | {row.get('uniformity_bottleneck', '')} | "
-                f"{loss.get('bneck_cosine', '')} | {loss.get('weighted_bneck_iso_mean', 0)} / "
-                f"{loss.get('weighted_bneck_iso_cov', 0)} |"
+                f"{loss.get('bneck_cosine', '')} | "
+                f"{loss.get('weighted_mean', 0) if direct else loss.get('weighted_bneck_iso_mean', 0)} / "
+                f"{loss.get('weighted_cov', 0) if direct else loss.get('weighted_bneck_iso_cov', 0)} |"
             )
         lines += ["", "성분별 raw loss·backbone/MLP gradient는 components.jsonl과 gradient_diagnostics.jsonl에 보존한다."]
     evaluations = (
@@ -219,7 +238,8 @@ def render(campaign):
         "## 해석과 미실행 항목",
         "",
         "미완료 단계와 점수는 추정해서 채우지 않는다. 완료 상태 전에는 최종 결론을 내리지 않는다.",
-        "다른 학습률/온도를 고른 양 조건의 차이는 동일 튜닝 예산 비교이며, 보조항 자체의 효과는 aux_off와 비교한다.",
+        ("이 비교는 새로 튜닝한 직접256d 구조 대 기존 최적 기준선이다. 탐색 범위·이력 차이가 있어 동일 설정의 인과 효과를 주장하지 않는다."
+         if direct else "다른 학습률/온도를 고른 양 조건의 차이는 동일 튜닝 예산 비교이며, 보조항 자체의 효과는 aux_off와 비교한다."),
         *(["iso_off는 cosine을 유지하면서 256d iso만 제거한다. aux_off는 iso를 유지하면서 cosine만 제거한다."] if iso else []),
         "256차원 bottleneck 지표만 개선되면 768차원 임베딩 개선으로 판정하지 않는다.",
         "과거 R18 보고 점수 대신 현재 campaign의 대조군을 비교 기준으로 삼는다.",
