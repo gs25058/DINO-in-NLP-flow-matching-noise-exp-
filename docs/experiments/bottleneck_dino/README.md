@@ -28,3 +28,7 @@ disown
 [최종 결과](RESULTS.md): 768d STS7은 기준선65.816±0.588, 직접DINO64.049±0.409로
 개선 가설은 기각됐다.256d 진단 STS7은58.155→60.355로 개선됐다.
 재사용 설정은 `configs/bottleneck_dino/selected.yaml`이며 실제 resolved config와 일치한다.
+
+[손실별 역할·동역학 상세 분석](LOSS_DYNAMICS.md)에는 step별 gradient, teacher entropy,
+실패 trial의 과도한 sharpening, 표현 공간별 기하 변화와 teacher 입력의 구현 주의점을 정리했다.
+재현 실행기는 `scripts/analyze_loss_dynamics.py`이며, 학습 없이 완료 로그와 CPU checkpoint를 읽는다.
