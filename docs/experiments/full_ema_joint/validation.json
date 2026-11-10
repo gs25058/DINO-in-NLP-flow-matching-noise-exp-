@@ -19,5 +19,22 @@
     "four protocol integration: search, nine confirmations, selection freeze, six final tests",
     "view audit compares equal noise settings; initialization/data order always compared"
   ],
-  "gpu_smoke": "pending: controller requires two 60-step smoke completions before search"
+  "gpu_smoke": {
+    "status": "passed",
+    "campaign": "results/experiments/full_ema_joint_20261110",
+    "runs": {
+      "bottleneck": {
+        "status": "smoke_complete",
+        "completed_steps": 60
+      },
+      "baseline": {
+        "status": "smoke_complete",
+        "completed_steps": 60
+      }
+    },
+    "same_initialization": true,
+    "same_data_order": true,
+    "same_first_views": true,
+    "source_commit": "207dee68160397e4b34f4e85bd714dd63577b4f5"
+  }
 }
