@@ -1,3 +1,9 @@
-# 약한 학생 뷰 실험
+# Weak student view experiment
 
-구현·검증 중. 실제 실행 결과는 아직 없음.
+Stage: smoke
+Clean EMA; CE8192 + iso768; one weak + two original strong student views.
+Control = full-clean-EMA trial1 hyperparameters; all runs start from pretrained BERT.
+Primary selection: 768d STS-B dev. Test only after selection freeze.
+
+| trial | state | dev best | dev last |
+|---|---|---|---|

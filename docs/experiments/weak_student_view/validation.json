@@ -16,5 +16,12 @@
     "weak-view interpolation, special/padding masks and student gradient",
     "clean EMA teacher tests and existing loss/update tests pass",
     "mock full protocol: 36 full runs, two smokes, selection frozen before test, pure weak-view removal matched controls"
-  ]
+  ],
+  "launch": {
+    "pid": 817413,
+    "source_commit": "06f465d46b46aef577dbe3608d9cfd1658078014",
+    "source_snapshot_hashes_verified": true,
+    "campaign": "results/experiments/weak_student_view_20261110",
+    "actual_state": "smoke queued; GPU admission waiting; no GPU training completed yet"
+  }
 }
