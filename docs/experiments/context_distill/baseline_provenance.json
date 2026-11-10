@@ -1,0 +1,13 @@
+{
+  "native_lineage": "configs/coviso_relax/base.yaml / full-clean-EMA trial1",
+  "lambda_mean": 5.874093568592943,
+  "lambda_cov": 5.874093568592943,
+  "common_new_protocol_changes": [
+    "new document corpus",
+    "content-only pooling including solo STS",
+    "covariance only first solo view once per step",
+    "weighted third CE",
+    "independent sentence-noise generators"
+  ],
+  "historical_scores_reference_only": true
+}

@@ -52,8 +52,11 @@ class ModelOutput:
 class DinoTextModel(nn.Module):
     """The sentence embedding is mean+L2; the head predicts teacher prototypes."""
 
-    def __init__(self, backbone_name, bottleneck_dim, logit_dim):
+    def __init__(self, backbone_name, bottleneck_dim, logit_dim, pooling_policy="all"):
         super().__init__()
+        if pooling_policy not in ("all", "content"):
+            raise ValueError("pooling_policy must be all or content")
+        self.pooling_policy = pooling_policy
         config = AutoConfig.from_pretrained(backbone_name)
         for field in (
             "hidden_dropout_prob",
@@ -68,11 +71,20 @@ class DinoTextModel(nn.Module):
     def get_input_embeddings(self):
         return self.backbone.get_input_embeddings()
 
-    def forward(self, inputs_embeds, attention_mask) -> ModelOutput:
+    def forward(self, inputs_embeds, attention_mask, pooling_mask=None, token_type_ids=None) -> ModelOutput:
+        if getattr(self, "pooling_policy", "all") == "content" and pooling_mask is None:
+            raise ValueError("content pooling requires an explicit content mask")
+        if attention_mask.ndim == 3:
+            # Transformers accepts precomputed 4D additive masks. A 3D bool
+            # mask would otherwise be mistaken for a padding mask in newer BERT.
+            allowed = attention_mask.bool().unsqueeze(1)
+            attention_mask = torch.zeros_like(allowed, dtype=inputs_embeds.dtype).masked_fill(
+                ~allowed, torch.finfo(inputs_embeds.dtype).min)
+        extra = {} if token_type_ids is None else {"token_type_ids": token_type_ids}
         hidden = self.backbone(
-            inputs_embeds=inputs_embeds, attention_mask=attention_mask
+            inputs_embeds=inputs_embeds, attention_mask=attention_mask, **extra
         ).last_hidden_state
-        pooled = masked_mean_pool(hidden, attention_mask)
+        pooled = masked_mean_pool(hidden, attention_mask if pooling_mask is None else pooling_mask)
         # Keep embedding normalization before the head: backward accumulation
         # order matters when CE and covariance both reach the pooled vector.
         embedding = F.normalize(pooled, p=2, dim=-1)

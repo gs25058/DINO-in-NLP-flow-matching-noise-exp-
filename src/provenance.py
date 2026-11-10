@@ -50,7 +50,9 @@ def record_run(root, cfg, student, device, argv):
     source_manifest = cfg.get("experiment", {}).get("source_manifest")
     source = json.loads(Path(source_manifest).read_text()) if source_manifest else git_info(root)
     data = {}
-    for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
+    for key in ("sentences_path", "rank_eval_path", "embed_stats_path", "context_manifest_path", "context_heldout_path"):
+        if key not in cfg["data"]:
+            continue
         path = root / cfg["data"][key]
         row = {
             "path": str(path.resolve()),

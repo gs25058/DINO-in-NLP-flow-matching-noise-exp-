@@ -40,16 +40,21 @@ def encode_sentences(
     chunks = {space: [] for space in spaces}
     try:
         for offset in range(0, len(sentences), batch_size):
+            content_pooling = getattr(model, "pooling_policy", "all") == "content"
+            extra = {"return_special_tokens_mask": True} if content_pooling else {}
             enc = tokenizer(
                 sentences[offset : offset + batch_size],
                 truncation=True,
                 max_length=max_length,
                 padding=True,
                 return_tensors="pt",
+                **extra,
             ).to(device)
+            pooling = {"pooling_mask": enc["attention_mask"].bool() & ~enc["special_tokens_mask"].bool()} if content_pooling else {}
             output = model(
                 inputs_embeds=model.get_input_embeddings()(enc["input_ids"]),
                 attention_mask=enc["attention_mask"],
+                **pooling,
             )
             representations = {"embedding": output.embedding}
             if "bottleneck" in spaces:

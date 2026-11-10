@@ -1,3 +1,10 @@
+# 현재 요청: 문맥 비대칭 자기증류
+
+[context_distill 명세](docs/experiments/context_distill/OPTUNA_SPEC.md)를 따른다.
+Teacher clean B only, 학생solo B2뷰+context1뷰, 내용토큰 B pooling, covariance는첫solo뷰1회다.
+A/B/C는 동일 원문 B·난수·데이터 순서를 사용하며 corpus 원문 위치로 인접성을 증명한다.
+이전 weak-view 실험은 사용자 요청으로 중단했다. 아래는 이전 실험 지침이다.
+
 # 현재 추가 실험: 약한 학생 뷰
 
 현재 요청은 [weak_student_view 명세](docs/experiments/weak_student_view/OPTUNA_SPEC.md)를 따른다.

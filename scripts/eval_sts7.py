@@ -16,7 +16,8 @@ from src.model import DinoTextModel  # noqa: E402
 
 def load_eval_model(checkpoint, device):
     cfg = checkpoint["model_cfg"]
-    model = DinoTextModel(cfg["backbone"], cfg["head"]["bottleneck_dim"], cfg["head"]["logit_dim"])
+    extra = {"pooling_policy": cfg["pooling_policy"]} if "pooling_policy" in cfg else {}
+    model = DinoTextModel(cfg["backbone"], cfg["head"]["bottleneck_dim"], cfg["head"]["logit_dim"], **extra)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     return model.to(device).eval()
 

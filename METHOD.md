@@ -1,3 +1,6 @@
+현재 문맥 실험의 공통 변경은 [context_distill 명세](docs/experiments/context_distill/OPTUNA_SPEC.md)에 별도로 정의한다.
+내용 토큰만 pooling하고 공분산 EMA를 첫solo B뷰에서1회 갱신한다. 기존 config 기본값은 아래 방법을 유지한다.
+
 현재 추가 실험은 첫학생뷰만 `augment.weak_view={t_lo,t_max}`의 고정 약한 범위로 생성한다.
 키가 없으면 기존3뷰 경로를 유지한다. [실험 명세](docs/experiments/weak_student_view/OPTUNA_SPEC.md).
 

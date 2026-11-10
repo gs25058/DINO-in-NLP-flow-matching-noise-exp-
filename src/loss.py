@@ -27,6 +27,7 @@ class DINOLoss(nn.Module):
         teacher_temp,
         student_temp,
         update_center=True,
+        view_weights=None,
     ):
         p_t = F.softmax((teacher_logits.detach() - self.center) / teacher_temp, dim=-1)
         h_pt = -(p_t * torch.log(p_t.clamp_min(1e-12))).sum(dim=-1).mean()
@@ -36,17 +37,26 @@ class DINOLoss(nn.Module):
             -(p_t * F.log_softmax(logits / student_temp, dim=-1)).sum(dim=-1).mean()
             for logits in student_logits
         ]
-        loss = torch.stack(ce).mean()
+        if view_weights is None:
+            loss = torch.stack(ce).mean()
+        else:
+            weights = torch.as_tensor(view_weights, device=ce[0].device, dtype=ce[0].dtype)
+            if len(weights) != len(ce) or not torch.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
+                raise ValueError("invalid DINO view weights")
+            loss = (torch.stack(ce) * weights).sum() / weights.sum()
         if update_center:
             with torch.no_grad():
                 self.center.mul_(self.center_momentum).add_(
                     teacher_logits.mean(dim=0), alpha=1 - self.center_momentum
                 )
-        return loss, {
+        diagnostics = {
             "H_pt": h_pt.detach(),
             "KL_pt_ps": loss.detach() - h_pt.detach(),
             "H_p_bar_t": h_p_bar.detach(),
         }
+        if view_weights is not None:
+            diagnostics.update({f"L_DINO_view_{i+1}": value.detach() for i, value in enumerate(ce)})
+        return loss, diagnostics
 
 
 @dataclass
@@ -173,6 +183,10 @@ class DINOObjective(nn.Module):
             cfg["cov_iso_start_step"],
             cfg["student_temp"],
         )
+        self.view_weights = cfg.get("view_weights")
+        self.covariance_view = cfg.get("cov_iso_view")
+        if self.covariance_view is not None and self.covariance_view != 0:
+            raise ValueError("single-view covariance is restricted to solo B view 0")
         self.bneck_weight = float(cfg.get("bneck_cosine_lambda", 0.0))
         if not math.isfinite(self.bneck_weight) or self.bneck_weight < 0:
             raise ValueError("bneck_cosine_lambda must be finite and nonnegative")
@@ -206,9 +220,12 @@ class DINOObjective(nn.Module):
         )
         if regularized is None:
             raise ValueError("bottleneck covariance requires cached student bottlenecks")
+        if self.covariance_view is not None:
+            regularized = regularized[:1]
         terms = [self.covariance(z) for z in regularized]
         dino, diagnostics = self.dino(
-            teacher_logits, student_logits, teacher_temp, self.student_temp
+            teacher_logits, student_logits, teacher_temp, self.student_temp,
+            **({"view_weights": self.view_weights} if self.view_weights is not None else {})
         )
         mean = torch.stack([t.mean for t in terms]).mean()
         cov = torch.stack([t.cov for t in terms]).mean()

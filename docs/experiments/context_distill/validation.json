@@ -1,0 +1,32 @@
+{
+  "before_tests": 100,
+  "after_tests": {
+    "passed": 111,
+    "seconds": 72.61
+  },
+  "GPU_smoke": "pending: controller gates full runs on A/B/C smoke success",
+  "data_counts": {
+    "documents_read": 20000,
+    "duplicates": 0,
+    "train": 146398,
+    "stats": 11993,
+    "heldout": 9036
+  },
+  "raw_offset_audit_samples": 100,
+  "raw_offset_audit_passed": true,
+  "document_splits_disjoint": true,
+  "preprocess_source_sha256": "1eb201494408ceb8fb96108dd0722f8e1c9e8f3bdd79ae2610ef8a6bda5b1e1e",
+  "data_preparation_command": "HF_HOME=/src/gs25058/scratch/.hf_home HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python scripts/prepare_context_data.py --raw-shard data/context_raw/20231101.en/train-00000-of-00041.parquet --out-dir data/context_wikipedia_v1",
+  "after_telemetry_change_context_tests": {
+    "passed": 11,
+    "seconds": 34.05
+  },
+  "previous_experiment_stopped": {
+    "controller_pid": 3494287,
+    "GPU_children_verified_gone": true
+  },
+  "final_report_integration_test": {
+    "passed": 1,
+    "seconds": 27.69
+  }
+}

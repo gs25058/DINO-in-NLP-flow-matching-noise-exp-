@@ -1,0 +1,23 @@
+extends: ../weak_student_view/base.yaml
+protocol: context_distill
+run_name: context_distill
+model:
+  backbone: bert-base-uncased
+  pooling_policy: content
+  head:
+    logit_dim: 8192
+    bottleneck_dim: 256
+data:
+  sentences_path: data/context_wikipedia_v1/train.jsonl
+  rank_eval_path: data/context_wikipedia_v1/rank_eval_sentences.jsonl
+  embed_stats_path: data/context_wikipedia_v1/embed_stats_bert_base_uncased.pt
+  context_manifest_path: data/context_wikipedia_v1/manifest.json
+  context_heldout_path: data/context_wikipedia_v1/heldout.jsonl
+context:
+  enabled: true
+  mode: none
+  weak_t_max: 0.1
+  beta: 1.0
+loss:
+  view_weights: [1.0, 1.0, 1.0]
+  cov_iso_view: 0

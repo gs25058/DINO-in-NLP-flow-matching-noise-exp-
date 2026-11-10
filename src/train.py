@@ -10,6 +10,7 @@ import logging
 import math
 import random
 import struct
+import time
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -167,6 +168,7 @@ class Trainer:
             model["backbone"],
             model["head"]["bottleneck_dim"],
             model["head"]["logit_dim"],
+            **({"pooling_policy": model["pooling_policy"]} if "pooling_policy" in model else {}),
         ).to(device)
         self.teacher = EMATeacher(self.student, train["momentum_start"])
         record_run(root, cfg, self.student, device, sys.argv)
@@ -178,6 +180,19 @@ class Trainer:
             warmup_steps=max(1, int(cfg["augment"]["warmup_frac"] * train["max_steps"])),
             weak_view=cfg["augment"].get("weak_view"),
         )
+        self.context_views = None
+        if cfg.get("context", {}).get("enabled", False):
+            from src.context import ContextViews
+            from src.context_data import validate_row
+            if train.get("teacher_input") != "ema" or model.get("pooling_policy") != "content":
+                raise ValueError("context experiment requires full EMA and content-only pooling")
+            if loss.get("cov_iso_view") != 0 or loss.get("view_weights") != [1.0, 1.0, cfg["context"]["beta"]]:
+                raise ValueError("context loss weights/regularization do not match experiment protocol")
+            with (root / data["sentences_path"]).open() as stream:
+                self.sentences = [json.loads(line) for line in stream]
+            for row in self.sentences:
+                validate_row(row)
+            self.context_views = ContextViews(cfg["context"], self.tokenizer, self.augment, cfg["seed"], device)
         self.objective = DINOObjective(
             loss,
             self.student.backbone.config.hidden_size,
@@ -204,6 +219,13 @@ class Trainer:
 
     def forward_views(self, sentences, step) -> EncodedViews:
         """No optimizer, center, covariance, or teacher EMA updates here."""
+        if getattr(self, "context_views", None) is not None:
+            target, embeddings, logits, bottlenecks, info = self.context_views.forward(
+                self.student, self.teacher, sentences, step)
+            self.context_step_info = info
+            if step == 0:
+                (self.run_dir / "context_first_views.json").write_text(json.dumps(info, indent=2) + "\n")
+            return EncodedViews(target, embeddings, logits, bottlenecks)
         enc = self.tokenizer(
             sentences,
             truncation=True,
@@ -435,6 +457,12 @@ class Trainer:
         self.student.train()
         order = hashlib.sha256() if train.get("record_batch_order", False) else None
         first_indices = None
+        started = time.monotonic()
+        total_tokens = 0
+        teacher_tokens = 0
+        padded_tokens = 0
+        if str(self.device).startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats()
         for step in range(steps):
             indices = sampler.next()
             if order is not None:
@@ -442,6 +470,11 @@ class Trainer:
                 if first_indices is None:
                     first_indices = indices
             result = self.training_step([self.sentences[i] for i in indices], step)
+            if getattr(self, "context_views", None) is not None:
+                info = self.context_step_info
+                total_tokens += 2 * info["solo_tokens"] + info["third_tokens"]
+                teacher_tokens += info["solo_tokens"]
+                padded_tokens += len(indices) * (3 * info["solo_padded_length"] + info["third_padded_length"])
             gradients = self.optimize(result, step)
             logging_step = step % evaluation["log_every_steps"] == 0 or step == steps - 1
             if logging_step:
@@ -478,6 +511,11 @@ class Trainer:
                     "best_loop_step": self.best_step,
                     "last_sts": sts,
                     "last_loop_step": step,
+                    "wall_seconds": time.monotonic() - started,
+                    "student_nonpad_tokens": total_tokens if getattr(self, "context_views", None) is not None else None,
+                    "teacher_nonpad_tokens": teacher_tokens if getattr(self, "context_views", None) is not None else None,
+                    "total_padded_tokens": padded_tokens if getattr(self, "context_views", None) is not None else None,
+                    "peak_cuda_memory_bytes": torch.cuda.max_memory_allocated() if str(self.device).startswith("cuda") else None,
                 },
                 indent=2,
             )
