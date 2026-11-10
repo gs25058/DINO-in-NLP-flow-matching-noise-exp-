@@ -250,7 +250,7 @@ def read_json_lines(path):
     return read_records(path)
 
 
-@pytest.mark.parametrize("protocol", ["bottleneck_cosine", "bottleneck_iso", "bottleneck_dino"])
+@pytest.mark.parametrize("protocol", ["bottleneck_cosine", "bottleneck_iso", "bottleneck_dino", "full_ema_joint"])
 def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_off(
     tmp_path, monkeypatch, protocol
 ):
@@ -259,7 +259,7 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
     campaign = tmp_path / "campaign"
     workspace = tmp_path / "workspace"
     with_iso = protocol == "bottleneck_iso"
-    direct = protocol == "bottleneck_dino"
+    direct = protocol in ("bottleneck_dino", "full_ema_joint")
     manifest = prepare(
         campaign,
         pipeline.ROOT,
@@ -382,7 +382,8 @@ def test_entire_paired_protocol_freezes_selection_before_test_and_has_pure_aux_o
         assert len(study.trials) == 3 and all(t.state.name == "COMPLETE" for t in study.trials)
         assert (
             study.trials[0].params["train.lr"]
-            == load_config(f"configs/{protocol}/base.yaml")["train"]["lr"]
+            == (load_config(f"configs/{protocol}/base.yaml")["search_anchor"]["train.lr"]
+                if protocol == "full_ema_joint" else load_config(f"configs/{protocol}/base.yaml")["train"]["lr"])
         )
     assert sum(x.startswith("train_confirm_") for x in calls) == (9 if direct else 18)
     assert sum(x.startswith("train_aux_off_") for x in calls) == (0 if direct else 3)
@@ -573,3 +574,79 @@ def test_direct_checkpoint_saves_center_and_loads_without_prototypes(tmp_path, m
     loaded = eval_sts7.load_eval_model(saved, "cpu")
     assert loaded.head.expand is None and not loaded.training
     assert all(torch.equal(v, loaded.state_dict()[k]) for k, v in saved["state_dict"].items())
+
+
+@pytest.mark.parametrize("teacher_input", ["ema", "student"])
+def test_teacher_lookup_dependency_clean_input_stop_gradient_and_single_ema(teacher_input):
+    torch.manual_seed(42)
+    trainer = Trainer.__new__(Trainer)
+    trainer.cfg = load_config("configs/full_ema_joint/base.yaml")
+    trainer.cfg["train"]["record_first_views"] = False
+    trainer.device = "cpu"
+    trainer.student = model()
+    trainer.teacher = EMATeacher(trainer.student, 0.997)
+    trainer.teacher_input = teacher_input
+    trainer.tokenizer = Tokenizer()
+    trainer.augment = FlowNoiseAug(torch.zeros(8), torch.ones(8), num_student_views=3,
+                                   t_lo=0.5, t_start=0.6, t_max=0.8, warmup_steps=100)
+    first = trainer.forward_views(["1", "2", "3"], 100)
+    with torch.no_grad():
+        trainer.student.get_input_embeddings().weight[:, 0].add_(0.7)
+    changed_student = trainer.forward_views(["1", "2", "3"], 100)
+    assert torch.equal(first.teacher.logits, changed_student.teacher.logits) == (teacher_input == "ema")
+    with torch.no_grad():
+        trainer.teacher.model.get_input_embeddings().weight[:, 1].add_(0.8)
+    changed_teacher = trainer.forward_views(["1", "2", "3"], 100)
+    assert torch.equal(changed_student.teacher.logits, changed_teacher.teacher.logits) == (teacher_input == "student")
+    ids = trainer.tokenizer(["1", "2", "3"])["input_ids"]
+    lookup = trainer.teacher.model if teacher_input == "ema" else trainer.student
+    with torch.no_grad():
+        clean = trainer.teacher(inputs_embeds=lookup.get_input_embeddings()(ids), attention_mask=torch.ones_like(ids))
+    assert torch.equal(clean.logits, changed_teacher.teacher.logits)
+    assert not changed_teacher.teacher.logits.requires_grad
+    sum(x.square().sum() for x in changed_teacher.student_logits).backward()
+    assert trainer.student.get_input_embeddings().weight.grad is not None
+    assert all(p.grad is None for p in trainer.teacher.model.parameters())
+    before = trainer.teacher.model.get_input_embeddings().weight.clone()
+    trainer.teacher.update(trainer.student)
+    torch.testing.assert_close(trainer.teacher.model.get_input_embeddings().weight,
+                               before * 0.997 + trainer.student.get_input_embeddings().weight.detach() * 0.003)
+
+
+def test_full_ema_joint_reuses_original_space_and_independent_covariance_weights():
+    from src.joint_search import SPACE
+    base = load_config("configs/full_ema_joint/base.yaml")
+    anchor = anchor_parameters(base, "bottleneck", {})
+    assert common_space(base) == SPACE and len(anchor) == 19
+    anchor["loss.cov_iso_mean_lambda"] = 0.5
+    anchor["loss.cov_iso_cov_lambda"] = 3.0
+    cfg = trial_config(optuna.trial.FixedTrial(anchor), base, "bottleneck", {})
+    assert cfg["model"]["head"] == {"logit_dim": 8192, "bottleneck_dim": 256}
+    assert cfg["train"]["teacher_input"] == "ema"
+    assert cfg["loss"]["cov_iso_mean_lambda"] == 0.5
+    assert cfg["loss"]["cov_iso_cov_lambda"] == 3.0
+    assert cfg["loss"].get("cov_iso_space", "embedding") == "embedding"
+    assert "bneck_cosine_lambda" not in cfg["loss"] and "bneck_iso_lambda" not in cfg["loss"]
+
+
+def test_joint_audit_groups_views_by_noise_but_always_checks_initialization_and_order(tmp_path):
+    from scripts.run_bottleneck import audit_runs
+    first = {
+        "seed": 42, "initial_student_sha256": "same_init", "architecture": 8192,
+        "batch_order": {"sha256": "same_order"}, "data": {"sentences": {"sha256": "same_data"}},
+        "first_views_group": "42_noise_a", "first_views": {"students": ["a"]},
+    }
+    second = copy.deepcopy(first)
+    second.update(first_views_group="42_noise_b", first_views={"students": ["b"]})
+    audit_runs(tmp_path, [first, second], {})
+    second["first_views_group"] = first["first_views_group"]
+    with pytest.raises(RuntimeError, match="noisy views"):
+        audit_runs(tmp_path, [first, second], {})
+    second["first_views_group"] = "42_noise_b"
+    second["initial_student_sha256"] = "different_init"
+    with pytest.raises(RuntimeError, match="initialization"):
+        audit_runs(tmp_path, [first, second], {})
+    second["initial_student_sha256"] = "same_init"
+    second["batch_order"]["sha256"] = "different_order"
+    with pytest.raises(RuntimeError, match="data order"):
+        audit_runs(tmp_path, [first, second], {})

@@ -42,18 +42,22 @@ def render(campaign):
     manifest = read_json(campaign / "source_manifest.json")
     state = read_json(campaign / "state.json")
     iso = manifest.get("protocol") == "bottleneck_iso"
-    direct = manifest.get("protocol") == "bottleneck_dino"
+    full = manifest.get("protocol") == "full_ema_joint"
+    direct = manifest.get("protocol") in ("bottleneck_dino", "full_ema_joint")
     comparisons = ("baseline",) if direct else ("baseline", "aux_off", "iso_off") if iso else ("baseline", "aux_off")
     lines = [
+        "# FlowDINO: 완전한 clean EMA + mean/cov 분리 공동 튜닝" if full else
         "# Direct 256d DINO + isotropy — 최적화된 FlowDINO 기준선과 비교" if direct else
         "# Bottleneck cosine + isotropy — 공정한 공동 튜닝 비교" if iso
         else "# Bottleneck cosine — 공정한 공동 튜닝 비교",
         "",
         f"상태: **{state['stage']}**.",
         f"campaign: `{campaign}`. 실행 소스 `{manifest['git']['commit']}`, `{manifest['git']['branch']}`.",
-        ("이미 튜닝된 FlowDINO 기준선을 고정하고 직접256d DINO+iso의 온도·iso 가중치 등을 새로 튜닝한다."
+        ("DINO8192+iso768 유지, mean/cov 독립 가중치 및 기존19축을 탐색. teacher는 자체 EMA word lookup 사용."
+         if full else "이미 튜닝된 FlowDINO 기준선을 고정하고 직접256d DINO+iso의 온도·iso 가중치 등을 새로 튜닝한다."
          if direct else "R18 실제 4000-step 대조군을 사용한다. covariance와 noise는 양쪽에서 고정한다."),
-        (f"직접256d 조건 {manifest['trials_per_arm']} trial ×4000 step; FlowDINO 재탐색 없음."
+        (f"완전한 EMA 조건 {manifest['trials_per_arm']} trial ×4000 step."
+         if full else f"직접256d 조건 {manifest['trials_per_arm']} trial ×4000 step; FlowDINO 재탐색 없음."
          if direct else f"각 조건 {manifest['trials_per_arm']} trial ×4000 step;")
         + " pruning 없음. 재검증 seed101/102/103.",
         "768차원 STS-B dev로 선택하고, 동결 후 768차원 STS7으로 판정한다. 256차원은 진단이다.",
@@ -62,7 +66,12 @@ def render(campaign):
         f"실행기: `{' '.join(manifest.get('launch_argv', []))}`",
         "",
     ]
-    if direct:
+    if full:
+        lines += [f"탐색 공간: `{manifest['common_space']}`.",
+                  "trial0은 과거 joint trial13, trial1은 R18 설정. 모든 새 탐색은 teacher_input=ema.",
+                  "과거67.097±0.260은 seed42/43/44의 joint13 참조다. 현재 baseline 표는 이전 R18 seed101/102/103 참조다.",
+                  "교사 입력과 다른 하이퍼파라미터도 달라질 수 있어 순수한 EMA 수정의 인과효과라고 주장하지 않는다.", ""]
+    if direct and not full:
         lines += [
             f"공통 탐색 범위: `{manifest['common_space']}`.",
             "teacher T = student T × ratio; warmup initial T = min(R18 initial T, final T).",
@@ -238,7 +247,8 @@ def render(campaign):
         "## 해석과 미실행 항목",
         "",
         "미완료 단계와 점수는 추정해서 채우지 않는다. 완료 상태 전에는 최종 결론을 내리지 않는다.",
-        ("이 비교는 새로 튜닝한 직접256d 구조 대 기존 최적 기준선이다. 탐색 범위·이력 차이가 있어 동일 설정의 인과 효과를 주장하지 않는다."
+        ("새 완전EMA FlowDINO와 역사적 기준선의 비교다. 공동 튜닝 및 teacher 입력이 함께 달라져 특정 변경의 인과 효과를 분리하지 못한다."
+         if full else "이 비교는 새로 튜닝한 직접256d 구조 대 기존 최적 기준선이다. 탐색 범위·이력 차이가 있어 동일 설정의 인과 효과를 주장하지 않는다."
          if direct else "다른 학습률/온도를 고른 양 조건의 차이는 동일 튜닝 예산 비교이며, 보조항 자체의 효과는 aux_off와 비교한다."),
         *(["iso_off는 cosine을 유지하면서 256d iso만 제거한다. aux_off는 iso를 유지하면서 cosine만 제거한다."] if iso else []),
         "256차원 bottleneck 지표만 개선되면 768차원 임베딩 개선으로 판정하지 않는다.",

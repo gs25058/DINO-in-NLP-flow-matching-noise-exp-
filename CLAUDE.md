@@ -1,6 +1,11 @@
 # 현재 브랜치 작업 지침
 
-이 브랜치의 현재 실험은 **8192 확장 없이256d bottleneck에 직접 DINO CE+iso를 적용**하는 조건이다.
+현재 추가 실험은 **기존 FlowDINO CE8192+iso768 / mean-cov 가중치 독립 / 완전 clean EMA teacher**다.
+[사전 등록](docs/experiments/full_ema_joint/OPTUNA_SPEC.md)에 따라 새 조건20 trial을 실행한다.
+teacher 입력은 teacher 자체 EMA word lookup으로 생성하며 student만 노이즈를 받는다.
+과거 실험의 기본 경로와 기록은 보존한다. 아래 실험2 안내는 이전 완료 실험의 범위다.
+
+이 브랜치에서 직전에 완료한 실험은 **8192 확장 없이256d bottleneck에 직접 DINO CE+iso를 적용**하는 조건이다.
 [실험2 명세](docs/experiments/bottleneck_dino/OPTUNA_SPEC.md)를 따른다.
 256d centering·teacher sharpening·student temperature를 유지한다. cosine·768d iso는 새 조건에서 쓰지 않는다.
 이미 튜닝된 FlowDINO 기준선은 재탐색하지 않고, 새 구조만 Optuna20 trial 후3시드로 검증한다.

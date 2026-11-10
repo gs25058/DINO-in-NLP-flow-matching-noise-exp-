@@ -1,5 +1,10 @@
 # 현재 실험의 학습 방법
 
+`train.teacher_input: ema`는 teacher 자체의 EMA word embedding을 clean 입력으로 사용한다.
+teacher position/type embeddings·Transformer·head도 EMA이며 gradient는 차단한다.
+키가 없으면 과거 student word lookup 공유 경로가 보존된다.
+새 실험은 [완전EMA 명세](docs/experiments/full_ema_joint/OPTUNA_SPEC.md)를 따른다.
+
 실험2의 별도 정의는 [직접256d DINO+iso 명세](docs/experiments/bottleneck_dino/OPTUNA_SPEC.md)다.
 `logit_dim: null`이면 MLP→L2의256d가 DINO logits이며8192 확장은 생성하지 않는다.
 `cov_iso_space: bottleneck`은 같은 EMA iso를256d에서만 계산한다. centering/sharpening은 그대로다.

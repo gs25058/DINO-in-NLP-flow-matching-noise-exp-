@@ -1,0 +1,29 @@
+extends: ../coviso_relax/base.yaml
+protocol: full_ema_joint
+run_name: flowdino_full_clean_ema
+train:
+  teacher_input: ema
+  record_batch_order: true
+  record_first_views: true
+eval:
+  bottleneck_geometry: true
+search_anchor:
+  loss.cov_iso_mean_lambda: 1.4948540903362064
+  loss.cov_iso_cov_lambda: 2.247944015207464
+  train.lr: 6.545727532374416e-05
+  train.head_lr: 0.00039969567127027346
+  train.grad_clip: 5.337049917615548
+  train.weight_decay: 0.13821244390893206
+  train.warmup_frac: 0.08771058784538847
+  train.momentum_end: 0.9981343830152652
+  train.momentum_ramp_frac: 0.34038897874030694
+  loss.teacher_temp: 0.12506484413951288
+  loss.warmup_teacher_temp: 0.05837008069937486
+  loss.student_temp: 0.12655703783527755
+  loss.teacher_temp_warmup_frac: 0.16719777593815738
+  loss.center_momentum: 0.9187320587014133
+  loss.cov_ema_momentum: 0.7879439828646531
+  augment.t_lo: 0.4664484163749474
+  _t_span: 0.4355063277399266
+  _t_start_frac: 0.10809492348141264
+  augment.warmup_frac: 0.0019071258426626332

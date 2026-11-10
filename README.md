@@ -1,6 +1,9 @@
 # FlowDINO
 
-현재 추가하는 실험2는 **256d bottleneck의 DINO CE+iso**다.8192 확장을 생성하지 않고,
+새 실험: [완전한 clean EMA teacher + mean/cov 분리 공동 튜닝](docs/experiments/full_ema_joint/README.md).
+기존 CE8192+iso768을 유지하고, 과거 joint13을 시작점으로20 trial을 새로 학습한다.
+
+직전에 완료한 실험2는 **256d bottleneck의 DINO CE+iso**다.8192 확장을 생성하지 않고,
 teacher256d center·sharpening을 유지한다. 이미 튜닝된 FlowDINO 기준선은 고정하고
 새 구조만20 trial로 튜닝한다. [실험2 실행 안내](docs/experiments/bottleneck_dino/README.md)를 따른다.
 

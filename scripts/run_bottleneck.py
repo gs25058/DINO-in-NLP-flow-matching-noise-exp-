@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import hashlib
 import os
 import random
 import signal
@@ -42,7 +43,7 @@ def set_stage(campaign, stage, **extra):
 def save_config(campaign, manifest, base, label, seed):
     cfg = copy.deepcopy(base)
     protocol = manifest.get("protocol", "bottleneck_cosine")
-    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino"}.get(protocol, "bneckcos")
+    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino", "full_ema_joint": "full_ema"}.get(protocol, "bneckcos")
     cfg.update(seed=seed, run_name=f"{prefix}_{campaign.name}_{label}_s{seed}")
     for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
         cfg["data"][key] = str(Path(manifest["workspace"]) / cfg["data"][key])
@@ -96,6 +97,12 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
         "initial_shared_sha256": provenance.get("initial_shared_sha256", provenance["initial_student_sha256"]),
         "architecture": cfg["model"]["head"]["logit_dim"],
         "first_views": read_json(log / "first_views.json") if (log / "first_views.json").exists() else None,
+        # Joint tuning intentionally changes the noise distribution. Compare
+        # first views only for the same seed and augmentation configuration.
+        "first_views_group": (
+            f"{seed}_{hashlib.sha256(yaml.safe_dump(cfg['augment'], sort_keys=True).encode()).hexdigest()}"
+            if manifest.get("protocol") == "full_ema_joint" else seed
+        ),
         "batch_order": order,
         "data": provenance["data"],
     }
@@ -118,8 +125,9 @@ def audit_runs(campaign, runs, calibration):
         if full_hashes.setdefault(architecture, full) != full:
             raise RuntimeError("unequal initialization within the same architecture and seed")
         if run.get("first_views") is not None:
-            if first_views.setdefault(seed, run["first_views"]) != run["first_views"]:
-                raise RuntimeError("unequal initial noisy views within seed")
+            view_group = run.get("first_views_group", seed)
+            if first_views.setdefault(view_group, run["first_views"]) != run["first_views"]:
+                raise RuntimeError("unequal initial noisy views within seed and noise configuration")
         order = run["batch_order"]["sha256"]
         if hashes.setdefault(seed, fingerprint) != fingerprint:
             raise RuntimeError("unequal pretrained initialization within seed")
@@ -169,6 +177,9 @@ def search(campaign, manifest, base, calibration, children):
         if study.trials:
             raise RuntimeError("existing study preserved; no silent sampler restart")
         study.enqueue_trial(anchor_parameters(base, arm, calibration))
+        if base.get("protocol") == "full_ema_joint":
+            from src.joint_search import baseline_parameters
+            study.enqueue_trial(baseline_parameters(base))
         studies[arm] = study
     for number in range(manifest["trials_per_arm"]):
         pending = {}
@@ -431,15 +442,17 @@ def run(campaign, manifest):
     protocol = manifest.get("protocol", "bottleneck_cosine")
     base = load_config(campaign / "source/configs" / protocol / "base.yaml")
     direct = protocol == "bottleneck_dino"
+    full = protocol == "full_ema_joint"
+    single = direct or full
     stage = "calibration"
     try:
-        if direct:
+        if single:
             stage = "reference_verification"
             set_stage(campaign, stage)
             reference = fixed_baseline(campaign, manifest, base)
             # Iso is tuned directly; the existing FlowDINO reference stays fixed.
             write_json(campaign / "calibration.json", {
-                "not_used": "No cosine auxiliary; direct DINO tunes iso in the preregistered [1e-3,10] log range.",
+                "not_used": "No cosine auxiliary; weights use the preregistered search space.",
                 "expected_shared_initial_sha256": read_json(campaign / "fixed_baseline.json")["expected_shared_initial_sha256"],
             })
         else:
@@ -471,11 +484,13 @@ def run(campaign, manifest):
         set_stage(campaign, stage)
 
         def smoke(gpu, arm):
-            if direct:
+            if single:
                 cfg = trial_config(
                     optuna.trial.FixedTrial(anchor_parameters(base, arm, calibration)),
                     base, arm, calibration,
                 )
+                if full and arm == "baseline":
+                    cfg["train"]["teacher_input"] = "student"
                 return execute_train(
                     campaign, manifest, children, gpu, cfg, f"smoke_{arm}", SEARCH_SEED, smoke=True
                 )
@@ -507,11 +522,11 @@ def run(campaign, manifest):
         stage = "confirmation"
         set_stage(campaign, stage)
         groups, confirmed = confirm(campaign, manifest, studies, children, calibration)
-        if direct:
+        if single:
             groups["baseline"] = reference
             write_json(campaign / "final_runs.json", groups)
         off = []
-        if not direct:
+        if not single:
             stage = "aux_off"
             set_stage(campaign, stage)
             off = ablate(campaign, manifest, groups, children)
@@ -542,6 +557,8 @@ def main():
                         help="joint cosine + 256d isotropy protocol, with iso-off confirmation")
     mode.add_argument("--direct-bottleneck-dino", action="store_true",
                       help="tune direct256 DINO+iso against the fixed, already-tuned FlowDINO reference")
+    mode.add_argument("--full-clean-ema", action="store_true",
+                      help="original FlowDINO, split mean/cov weights, full EMA input, joint19 tuning")
     parser.add_argument("--reference-baseline", type=Path,
                         default=ROOT / "results/experiments/bneck_iso_20261104")
     args = parser.parse_args()
@@ -581,6 +598,7 @@ def main():
     if args.trials_per_arm != 20 and not args.budget_reason.strip():
         parser.error("reduced equal budget requires a reason before starting")
     protocol = (
+        "full_ema_joint" if args.full_clean_ema else
         "bottleneck_dino" if args.direct_bottleneck_dino else
         "bottleneck_iso" if args.with_bneck_iso else "bottleneck_cosine"
     )
@@ -600,7 +618,7 @@ def main():
         protocol=protocol,
         initial_workspace_branch=manifest["git"]["branch"],
     )
-    if args.direct_bottleneck_dino:
+    if args.direct_bottleneck_dino or args.full_clean_ema:
         manifest.update(
             search_arms=["bottleneck"], reference_groups=["baseline"],
             reference_baseline_campaign=str(args.reference_baseline.resolve()),

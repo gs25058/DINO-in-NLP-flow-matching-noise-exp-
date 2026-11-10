@@ -18,6 +18,9 @@ SAMPLER_SEED = 20261104
 
 
 def common_space(base):
+    if base.get("protocol") == "full_ema_joint":
+        from src.joint_search import SPACE
+        return SPACE
     if base.get("protocol") == "bottleneck_dino":
         return {
             "train.lr": (base["train"]["lr"] * 0.5, base["train"]["lr"] * 2.0, True),
@@ -34,6 +37,8 @@ def common_space(base):
 
 
 def anchor_parameters(base, arm, calibration):
+    if base.get("protocol") == "full_ema_joint":
+        return copy.deepcopy(base["search_anchor"])
     if base.get("protocol") == "bottleneck_dino":
         return {
             key: (base["loss"]["teacher_temp"] / base["loss"]["student_temp"]
@@ -54,6 +59,9 @@ def anchor_parameters(base, arm, calibration):
 
 
 def trial_config(trial, base, arm, calibration):
+    if base.get("protocol") == "full_ema_joint":
+        from src.joint_search import suggest_config
+        return suggest_config(trial, base)
     cfg = copy.deepcopy(base)
     for key, (low, high, log) in common_space(base).items():
         section, name = key.split(".")

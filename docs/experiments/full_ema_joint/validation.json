@@ -1,0 +1,23 @@
+{
+  "before_tests": {
+    "passed": 88
+  },
+  "after_full_suite": {
+    "passed": 92,
+    "seconds": 71.27
+  },
+  "after_final_noise_audit_change": {
+    "command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python -m pytest -q tests/test_bottleneck.py",
+    "passed": 30,
+    "seconds": 61.07
+  },
+  "checks": [
+    "own EMA word lookup dependency; clean input; teacher stop-gradient",
+    "teacher parameters updated once",
+    "default legacy student lookup preserved",
+    "joint19 space and independent mean/cov; CE8192 and iso768",
+    "four protocol integration: search, nine confirmations, selection freeze, six final tests",
+    "view audit compares equal noise settings; initialization/data order always compared"
+  ],
+  "gpu_smoke": "pending: controller requires two 60-step smoke completions before search"
+}

@@ -197,6 +197,9 @@ class Trainer:
         self.momentum_steps = max(1, int(train["momentum_ramp_frac"] * train["max_steps"]))
         self.gradient_steps = set(train["component_grad_steps"])
         self.best_sts, self.best_step = -float("inf"), -1
+        self.teacher_input = train.get("teacher_input", "student")
+        if self.teacher_input not in ("student", "ema"):
+            raise ValueError("teacher_input must be student or ema")
 
     def forward_views(self, sentences, step) -> EncodedViews:
         """No optimizer, center, covariance, or teacher EMA updates here."""
@@ -215,15 +218,19 @@ class Trainer:
         special = enc["special_tokens_mask"].bool().to(self.device) | ~mask.bool()
         token_embeds = self.student.get_input_embeddings()(ids)
         views = self.augment(token_embeds, special, step)
+        teacher_embeds = views.teacher_embeds
+        if getattr(self, "teacher_input", "student") == "ema":
+            with torch.no_grad():
+                teacher_embeds = self.teacher.model.get_input_embeddings()(ids)
         if step == 0 and self.cfg["train"].get("record_first_views", False):
             def fingerprint(tensor):
                 return hashlib.sha256(tensor.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
 
             (self.run_dir / "first_views.json").write_text(json.dumps({
-                "teacher": fingerprint(views.teacher_embeds),
+                "teacher": fingerprint(teacher_embeds),
                 "students": [fingerprint(view) for view in views.student_embeds],
             }, indent=2) + "\n")
-        teacher = self.teacher(inputs_embeds=views.teacher_embeds, attention_mask=mask)
+        teacher = self.teacher(inputs_embeds=teacher_embeds, attention_mask=mask)
         count = len(views.student_embeds)
         student = self.student(
             inputs_embeds=torch.cat(views.student_embeds, dim=0),
