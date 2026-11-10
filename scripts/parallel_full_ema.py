@@ -109,7 +109,7 @@ def run(campaign, old_controller, record):
             pruner=optuna.pruners.NopPruner(),
         )
         running = [t.number for t in study.trials if t.state == TrialState.RUNNING]
-        guard_output = subprocess.check_output(["ps", "--ppid", str(old_controller), "-o", "pid=,args="], text=True)
+        guard_output = subprocess.check_output(["ps", "-ww", "--ppid", str(old_controller), "-o", "pid=,args="], text=True)
         for line in guard_output.splitlines():
             pid, args = line.strip().split(None, 1)
             if str(campaign / "source/scripts/gpu_guard.py") not in args:
