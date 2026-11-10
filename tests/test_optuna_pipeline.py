@@ -98,3 +98,67 @@ def test_control_search_confirmation_selection_then_test(tmp_path, monkeypatch, 
         selected["experiment"]["selected_from_dev_only"] and selected["train"]["max_steps"] == 4000
     )
     assert read_json(campaign / "initialization_audit.json")["same_initialization_per_seed"]
+
+
+def test_parallel_full_ema_adopts_active_trial_and_spends_only_remaining_budget(tmp_path):
+    import threading
+    import optuna
+    from scripts.parallel_full_ema import parallel_search
+
+    study = optuna.create_study(storage=f"sqlite:///{tmp_path / 'study.db'}", direction="maximize")
+    old = study.ask()
+    old.set_user_attr('run', {'preserved': True})
+    study.tell(old, 0.7)
+    active_trial = study.ask()
+    active_trial.suggest_float('x', 0.0, 1.0)
+    lock, barrier = threading.Lock(), threading.Barrier(2)
+    counts = {'active': 0, 'peak': 0}
+    calls, completed, stopped = [], [], []
+
+    def prepare(trial):
+        if trial.number == 1:
+            return dict(study.trials[1].params)
+        return {'x': trial.suggest_float('x', 0.0, 1.0)}
+
+    def execute(number, gpu, cfg):
+        with lock:
+            calls.append(number)
+            counts['active'] += 1
+            counts['peak'] = max(counts['peak'], counts['active'])
+        try:
+            if number in (1, 2):
+                barrier.wait(timeout=10)
+            return {'metrics': {'best_sts': 0.7 + number / 1000}, 'config': cfg}
+        finally:
+            with lock:
+                counts['active'] -= 1
+
+    parallel_search(study, 6, ['auto', 'auto'], prepare, execute, completed.append,
+                    lambda: stopped.append(True))
+    assert sorted(calls) == [1, 2, 3, 4, 5]
+    assert len(study.trials) == 6 and all(t.state.name == 'COMPLETE' for t in study.trials)
+    assert study.trials[0].user_attrs['run'] == {'preserved': True}
+    assert counts['peak'] == 2 and len(completed) == 5 and not stopped
+    assert study.trials[1].params == active_trial.params
+
+
+def test_parallel_full_ema_failure_stops_workers_before_waiting(tmp_path):
+    import threading
+    import optuna
+    from scripts.parallel_full_ema import parallel_search
+
+    study = optuna.create_study(storage=f"sqlite:///{tmp_path / 'study.db'}")
+    entered, stopping = threading.Event(), threading.Event()
+
+    def execute(number, gpu, cfg):
+        if number == 0:
+            assert entered.wait(10)
+            raise RuntimeError('worker failed')
+        entered.set()
+        assert stopping.wait(10)
+        raise RuntimeError('stopped peer')
+
+    with pytest.raises(RuntimeError, match='worker failed'):
+        parallel_search(study, 20, ['auto', 'auto'], lambda trial: {}, execute,
+                        lambda run: None, stopping.set)
+    assert stopping.is_set() and len(study.trials) == 2
