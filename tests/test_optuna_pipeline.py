@@ -213,3 +213,63 @@ def test_weak_view_protocol_preserves_baseline_freezes_selection_and_runs_matche
     reference=load_config('configs/weak_student_view/base.yaml')
     assert reference['loss']['cov_iso_mean_lambda']==5.874093568592943
     assert reference['loss']['cov_iso_cov_lambda']==5.874093568592943
+
+
+def test_weak_view_resume_retries_same_trials_without_overwriting_partial_runs(tmp_path,monkeypatch):
+    import optuna
+    from scripts import run_weak_view as weak
+    from scripts.resume_weak_view import resume_campaign
+    from src.provenance import prepare,write_json,verify_source
+    p=weak.p;c=tmp_path/'campaign'
+    m=prepare(c,p.ROOT,['auto','auto'],tmp_path/'report.md',experiment_dir='weak_student_view')
+    m.update(protocol='weak_student_view',trials_per_arm=20)
+    m['baseline'].update(initial_student_sha256='full42',initial_shared_sha256='same42')
+    write_json(c/'source_manifest.json',m)
+    write_json(c/'calibration.json',{'expected_shared_initial_sha256':{'42':'same42'}})
+    calls=[]
+    def train(campaign,manifest,children,gpu,cfg,label,seed,smoke=False):
+        calls.append((label,seed))
+        path,resolved=p.save_config(campaign,manifest,cfg,label,seed)
+        return {'run_name':resolved['run_name'],'config':str(path),'seed':seed,'label':label,
+                'metrics':{'best_sts':.7+seed*1e-6,'last_sts':.69,'completed_steps':4000},
+                'initial_student_sha256':f'full{seed}','initial_shared_sha256':f'same{seed}',
+                'architecture':8192,'first_views':None,'batch_order':{'sha256':f'order{seed}'},
+                'data':{'sentences':{'sha256':'data'}}}
+    base=p.load_config('configs/weak_student_view/base.yaml')
+    study=optuna.create_study(study_name=c.name,storage=f"sqlite:///{c/'bottleneck.db'}",direction='maximize')
+    originals={}
+    first=None
+    for number in range(4):
+        t=study.ask();cfg=weak.suggest(t,base)
+        if number<2:
+            run=train(c,m,None,'auto',cfg,f'search_bottleneck_t{number}',42)
+            t.set_user_attr('run',run);study.tell(t,run['metrics']['best_sts'])
+            first=first or run
+        else:
+            path,_=p.save_config(c,m,cfg,f'search_bottleneck_t{number}',42)
+            originals[path]=path.read_bytes()
+    baseline=train(c,m,None,'auto',base,'control_s42',42)
+    write_json(c/'paired_pilot.json',{'baseline':baseline,'weak':first})
+    write_json(c/'state.json',{'stage':'failed'})
+    (c/'report.md').write_text('preserved prior report')
+    partial=c/'commands/train_search_bottleneck_t2_s42.log';partial.write_text('partial training evidence')
+    calls.clear();evaluated=[]
+    def evaluate(campaign,manifest,groups,children):
+        assert (campaign/'selection.json').exists()
+        assert set(groups)=={'baseline','bottleneck','aux_off'}
+        evaluated.append(True)
+    monkeypatch.setattr(p,'execute_train',train);monkeypatch.setattr(p,'evaluate',evaluate)
+    monkeypatch.setattr(p,'set_stage',p.set_stage);monkeypatch.setattr(p,'render',p.render)
+    monkeypatch.setattr(weak.signal,'signal',lambda *args:None)
+    record=c/'continuations/retry1/registration.json'
+    resume_campaign(c,record,weak)
+    assert len(calls)==33 and evaluated
+    assert ('search_bottleneck_t2_retry1',42) in calls and ('search_bottleneck_t3_retry1',42) in calls
+    assert not any(label in ('search_bottleneck_t0','search_bottleneck_t1') for label,_ in calls)
+    assert all(path.read_bytes()==old for path,old in originals.items())
+    assert partial.read_text()=='partial training evidence'
+    assert read_json(record)['completed_preserved']==[0,1]
+    assert (record.parent/'study_before.sqlite').exists()
+    assert len(study.trials)==20 and all(t.state.name=='COMPLETE' for t in study.trials)
+    assert read_json(c/'state.json')['stage']=='complete'
+    verify_source(c,m)

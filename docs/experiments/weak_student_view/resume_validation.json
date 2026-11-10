@@ -1,0 +1,18 @@
+{
+  "tests": {
+    "command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python -m pytest -q tests/test_optuna_pipeline.py",
+    "passed": 6,
+    "seconds": 18.33
+  },
+  "checks": [
+    "completed trials remain unchanged",
+    "interrupted trials keep parameters and trial numbers",
+    "fresh 4000-step retries use separate run names",
+    "partial config and log bytes remain unchanged",
+    "study budget stays 20; confirmation and matched controls execute after search",
+    "selection frozen before test",
+    "original frozen source hash verification before and after continuation"
+  ],
+  "restart_reason": "Original checkpoint omits optimizer, scheduler and RNG state; exact in-run checkpoint resume is not supported.",
+  "sampler_seed_after_continuation": 20261111
+}
