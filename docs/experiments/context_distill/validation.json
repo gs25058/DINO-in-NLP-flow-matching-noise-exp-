@@ -4,7 +4,18 @@
     "passed": 111,
     "seconds": 72.61
   },
-  "GPU_smoke": "pending: controller gates full runs on A/B/C smoke success",
+  "GPU_smoke": {
+    "passed": [
+      "A",
+      "B",
+      "C"
+    ],
+    "steps_each": 60,
+    "matched_B_tokens_noise_teacher": true,
+    "matched_BC_lengths_positions": true,
+    "campaign": "results/experiments/context_distill_20261110",
+    "training_source_commit": "6b5cc51f648306505b164c7288e254fa1b31399d"
+  },
   "data_counts": {
     "documents_read": 20000,
     "duplicates": 0,
@@ -28,5 +39,11 @@
   "final_report_integration_test": {
     "passed": 1,
     "seconds": 27.69
+  },
+  "launch": {
+    "supervisor_pid": 127264,
+    "stage": "paired_search",
+    "combination": 0,
+    "note": "A/B full4000-step jobs launched after all three smokes. User asked why A is needed; original registered budget remains unchanged."
   }
 }

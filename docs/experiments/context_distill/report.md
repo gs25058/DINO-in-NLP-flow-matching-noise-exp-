@@ -1,3 +1,12 @@
-# 주변 문맥 비대칭 자기증류
+# Surrounding-context asymmetric distillation
 
-구현·검증 중. 새 비교의 STS 결과는 아직 없다. 과거 wiki1m 점수는 이번 결과로 대체하지 않는다.
+Stage: paired_search
+Teacher: clean B only. Student: two solo B views plus a weighted third view.
+All arms: content-only B pooling; covariance on solo view1 once/step.
+Native wiki1m scores are historical references only; comparisons use the same new Wikipedia centers.
+
+| combination | A dev best | B dev best | C dev best | B−C (pp) |
+|---|---|---|---|---|
+
+Context diagnostic JSON files are separate; attention visualization is not used as evidence.
+Missing results are unexecuted, not estimated. All checkpoint selection uses solo-sentence dev STS.
