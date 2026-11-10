@@ -22,4 +22,4 @@ trial0은 과거 joint13, trial1은 R18 초매개변수이며 모두 완전EMA�
 사용자 요청으로 탐색도 최대2개 trial 병렬 실행으로 전환했다.
 [전환 명세](PARALLEL_CONTINUATION.md)에 기존 trial 보존 및 sampler 변경을 기록한다.
 실제 전환 정보는 campaign의 `continuations/parallel_20261110/registration.json`,
-실행 로그는 `results/logs/full_ema_joint_20261110.parallel.supervisor.log`에서 확인한다.
+실행 로그는 `results/logs/full_ema_joint_20261110.parallel.retry1.supervisor.log`에서 확인한다.

@@ -36,5 +36,45 @@
     "same_data_order": true,
     "same_first_views": true,
     "source_commit": "207dee68160397e4b34f4e85bd714dd63577b4f5"
+  },
+  "parallel_continuation": {
+    "controller_commit": "38f72fd",
+    "controller_sha256": "7f20b0697b8888a80e5f8979ea5a4d556d848e9678c8d7662f7a06c995ba5e7c",
+    "registration": "results/experiments/full_ema_joint_20261110/continuations/parallel_20261110/registration.json",
+    "tests": {
+      "command": "CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 UV_CACHE_DIR=/tmp/flowdino-uv-cache uv run --no-sync python -m pytest -q tests/test_optuna_pipeline.py",
+      "passed": 4,
+      "seconds": 9.63
+    },
+    "completed_preserved": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "actual_concurrent_training_verified": [
+      {
+        "trial": 5,
+        "physical_gpu": 6,
+        "pid": 1111388,
+        "adopted_existing_training": true
+      },
+      {
+        "trial": 6,
+        "physical_gpu": 0,
+        "pid": 1228402,
+        "fresh_pretrained_start": true
+      }
+    ],
+    "search_budget": 20,
+    "first_handoff_attempt": "Aborted before registration or new trials because ps truncated a long command; original controller safely resumed. Fixed using ps -ww; failed source/log kept.",
+    "training_snapshot_unchanged": true,
+    "sampler_change_registered": {
+      "seed": 20261110,
+      "n_startup_trials": 5,
+      "multivariate": true,
+      "constant_liar": true
+    }
   }
 }
