@@ -176,6 +176,7 @@ class Trainer:
             stats["std"],
             **{k: cfg["augment"][k] for k in ("num_student_views", "t_lo", "t_start", "t_max")},
             warmup_steps=max(1, int(cfg["augment"]["warmup_frac"] * train["max_steps"])),
+            weak_view=cfg["augment"].get("weak_view"),
         )
         self.objective = DINOObjective(
             loss,

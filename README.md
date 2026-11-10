@@ -1,5 +1,7 @@
 # FlowDINO
 
+현재 실험: [약한 학생 뷰 1 + 기존 뷰 2](docs/experiments/weak_student_view/README.md).
+
 FlowDINO는 라벨이 없는 영어 문장으로 문장 임베딩을 학습하는 연구입니다. 깨끗한 문장을 입력받는 teacher의 출력 분포를, 가우시안 노이즈가 섞인 문장을 입력받는 student가 예측합니다. 여기에 임베딩의 평균과 공분산을 정규화해 표현 공간을 개선합니다.
 
 ## 방법

@@ -1,0 +1,20 @@
+{
+  "before_tests": 95,
+  "after_tests": {
+    "passed": 99,
+    "seconds": 51.38
+  },
+  "gpu_smoke": "pending; automatically gates paired full training",
+  "baseline_resolved_sections_match_actual_selected_trial1": true,
+  "after_final_report_and_startup_audit_change": {
+    "protocol_integration_passed": 1,
+    "seconds": 11.19
+  },
+  "verified": [
+    "default and equal-bounds legacy augmentation bitwise preserved",
+    "only first student view changes; strong views 1/2 and RNG state bitwise identical",
+    "weak-view interpolation, special/padding masks and student gradient",
+    "clean EMA teacher tests and existing loss/update tests pass",
+    "mock full protocol: 36 full runs, two smokes, selection frozen before test, pure weak-view removal matched controls"
+  ]
+}

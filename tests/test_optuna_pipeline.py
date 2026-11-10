@@ -162,3 +162,54 @@ def test_parallel_full_ema_failure_stops_workers_before_waiting(tmp_path):
         parallel_search(study, 20, ['auto', 'auto'], lambda trial: {}, execute,
                         lambda run: None, stopping.set)
     assert stopping.is_set() and len(study.trials) == 2
+
+
+def test_weak_view_protocol_preserves_baseline_freezes_selection_and_runs_matched_controls(tmp_path,monkeypatch):
+    import copy
+    from scripts import run_weak_view as weak
+    from src.train import load_config
+    from src.provenance import prepare,write_json
+    p=weak.p
+    c=tmp_path/'campaign'
+    m=prepare(c,p.ROOT,['auto','auto'],tmp_path/'report.md',experiment_dir='weak_student_view')
+    m.update(protocol='weak_student_view',trials_per_arm=20,common_space=weak.SPACE)
+    m['baseline'].update(initial_student_sha256='full42',initial_shared_sha256='same42')
+    write_json(c/'source_manifest.json',m)
+    calls=[]
+    def train(campaign,manifest,children,gpu,cfg,label,seed,smoke=False):
+        calls.append((label,seed,smoke))
+        path,resolved=p.save_config(campaign,manifest,cfg,label,seed)
+        assert resolved['train']['teacher_input']=='ema'
+        assert resolved['model']['head']['logit_dim']==8192
+        return {'run_name':resolved['run_name'],'config':str(path),'seed':seed,'label':label,
+                'metrics':{'best_sts':.7+seed*1e-6+(.001 if cfg['augment'].get('weak_view') else 0),
+                           'last_sts':.69,'completed_steps':60 if smoke else 4000},
+                'initial_student_sha256':f'full{seed}','initial_shared_sha256':f'same{seed}',
+                'architecture':8192,'first_views':None,'batch_order':{'sha256':f'order{seed}'},
+                'data':{'sentences':{'sha256':'data'}}}
+    evaluated=[]
+    def evaluate(campaign,manifest,groups,children):
+        assert (campaign/'selection.json').exists()
+        assert set(groups)=={'baseline','bottleneck','aux_off'}
+        for seed in ('101','102','103'):
+            a=load_config(groups['bottleneck'][seed]['config'])
+            b=load_config(groups['aux_off'][seed]['config'])
+            assert a['augment'].pop('weak_view')['t_lo']==0
+            for cfg in (a,b):
+                cfg.pop('run_name');cfg.pop('experiment')
+            assert a==b
+        evaluated.append(True)
+    monkeypatch.setattr(p,'execute_train',train)
+    monkeypatch.setattr(p,'evaluate',evaluate)
+    monkeypatch.setattr(p,'set_stage',p.set_stage)
+    monkeypatch.setattr(p,'render',p.render)
+    monkeypatch.setattr(weak.signal,'signal',lambda *args:None)
+    weak.run(c,m)
+    assert read_json(c/'state.json')['stage']=='complete' and evaluated
+    assert sum(not smoke for _,_,smoke in calls)==36
+    assert sum(smoke for _,_,smoke in calls)==2
+    assert sum(label.startswith('confirm_') for label,_,_ in calls)==9
+    assert sum(label=='aux_off' for label,_,_ in calls)==3
+    reference=load_config('configs/weak_student_view/base.yaml')
+    assert reference['loss']['cov_iso_mean_lambda']==5.874093568592943
+    assert reference['loss']['cov_iso_cov_lambda']==5.874093568592943

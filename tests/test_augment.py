@@ -90,3 +90,53 @@ def test_curriculum_monotonic_and_bounded():
     assert math.isclose(aug.t_hi(0), t_start, rel_tol=1e-6)
     assert math.isclose(aug.t_hi(warmup_steps), t_max, rel_tol=1e-6)
     assert math.isclose(aug.t_hi(warmup_steps * 10), t_max, rel_tol=1e-6)
+
+
+def test_weak_view_changes_only_first_view_and_preserves_rng_teacher_and_gradients():
+    import copy
+    aug = _make_aug(t_lo=.39, t_start=.46, t_max=.88)
+    weak = copy.deepcopy(aug)
+    weak.weak_view = {'t_lo': 0., 't_max': .15}
+    x, special = _make_batch(4, 6)
+    x.requires_grad_()
+    state = torch.get_rng_state()
+    original = aug(x, special, 100)
+    after_original = torch.get_rng_state()
+    torch.set_rng_state(state)
+    changed = weak(x, special, 100)
+    assert torch.equal(after_original, torch.get_rng_state())
+    assert torch.equal(changed.teacher_embeds, original.teacher_embeds)
+    assert not torch.equal(changed.student_embeds[0], original.student_embeds[0])
+    for a, b in zip(changed.student_embeds[1:], original.student_embeds[1:]):
+        assert torch.equal(a, b)
+    for view in changed.student_embeds:
+        assert torch.equal(view[special], x[special])
+    # Recover exactly the t and epsilon draws; validate the weak interpolation.
+    torch.set_rng_state(state)
+    t = .15 * torch.rand(4)
+    eps = torch.randn_like(x)
+    expected = ((1-t[:, None, None]) * ((x-aug.mu)/aug.sigma) + t[:, None, None]*eps)*aug.sigma+aug.mu
+    expected = torch.where(special.unsqueeze(-1), x, expected)
+    assert torch.equal(changed.student_embeds[0], expected)
+    changed.student_embeds[0].sum().backward()
+    expected_grad = torch.where(special.unsqueeze(-1), torch.ones_like(x), (1-t[:, None, None]).expand_as(x))
+    torch.testing.assert_close(x.grad, expected_grad)
+
+
+def test_disabled_weak_view_is_bitwise_legacy_and_equal_bounds_reproduce_all_views():
+    aug = _make_aug(t_lo=.39, t_start=.46, t_max=.88)
+    x, special = _make_batch(4, 6)
+    state = torch.get_rng_state()
+    expected = aug(x, special, 0)
+    aug.weak_view = {'t_lo': .39, 't_max': .46}
+    torch.set_rng_state(state)
+    actual = aug(x, special, 0)
+    assert all(torch.equal(a,b) for a,b in zip(expected.student_embeds,actual.student_embeds))
+
+
+def test_invalid_weak_view_configuration_rejected():
+    import pytest
+    for weak in ({'t_lo':-.1,'t_max':.1}, {'t_lo':.2,'t_max':.1}, {'t_max':.1}):
+        with pytest.raises(ValueError):
+            FlowNoiseAug(torch.zeros(8),torch.ones(8),num_student_views=3,
+                         t_lo=.39,t_start=.46,t_max=.88,warmup_steps=100,weak_view=weak)

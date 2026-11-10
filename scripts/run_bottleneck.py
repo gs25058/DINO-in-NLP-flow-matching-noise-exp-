@@ -43,7 +43,7 @@ def set_stage(campaign, stage, **extra):
 def save_config(campaign, manifest, base, label, seed):
     cfg = copy.deepcopy(base)
     protocol = manifest.get("protocol", "bottleneck_cosine")
-    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino", "full_ema_joint": "full_ema"}.get(protocol, "bneckcos")
+    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino", "full_ema_joint": "full_ema", "weak_student_view": "weakview"}.get(protocol, "bneckcos")
     cfg.update(seed=seed, run_name=f"{prefix}_{campaign.name}_{label}_s{seed}")
     for key in ("sentences_path", "rank_eval_path", "embed_stats_path"):
         cfg["data"][key] = str(Path(manifest["workspace"]) / cfg["data"][key])
@@ -101,7 +101,7 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
         # first views only for the same seed and augmentation configuration.
         "first_views_group": (
             f"{seed}_{hashlib.sha256(yaml.safe_dump(cfg['augment'], sort_keys=True).encode()).hexdigest()}"
-            if manifest.get("protocol") == "full_ema_joint" else seed
+            if manifest.get("protocol") in ("full_ema_joint", "weak_student_view") else seed
         ),
         "batch_order": order,
         "data": provenance["data"],

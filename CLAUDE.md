@@ -1,3 +1,8 @@
+# 현재 추가 실험: 약한 학생 뷰
+
+현재 요청은 [weak_student_view 명세](docs/experiments/weak_student_view/OPTUNA_SPEC.md)를 따른다.
+clean EMA·기존 CE8192+iso768을 유지하며 첫학생뷰만 약하게 만든다. 아래는 이전 실험 지침이다.
+
 # 현재 브랜치 작업 지침
 
 현재 추가 실험은 **기존 FlowDINO CE8192+iso768 / mean-cov 가중치 독립 / 완전 clean EMA teacher**다.

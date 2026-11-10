@@ -1,0 +1,12 @@
+{
+  "campaign": "/src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/full_ema_joint_20261110",
+  "run_name": "full_ema_full_ema_joint_20261110_search_bottleneck_t1_s42",
+  "trial": 1,
+  "checkpoint": "reference only; all new runs start from pretrained BERT",
+  "seed": 42,
+  "initial_student_sha256": "87c4062464178922bdd2334eeefae49da8f67003f6b9e36ee7e09a3f8561d241",
+  "initial_shared_sha256": "c54a21ab69aab9b957d65fd819f2cb810bc058cc3c00aa50ce17681d0970a084",
+  "config": "/src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/full_ema_joint_20261110/configs/search_bottleneck_t1_s42.yaml",
+  "source_commit": "207dee68160397e4b34f4e85bd714dd63577b4f5",
+  "historical_scores_are_reference_only": true
+}

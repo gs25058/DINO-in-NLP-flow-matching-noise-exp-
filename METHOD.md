@@ -1,3 +1,6 @@
+현재 추가 실험은 첫학생뷰만 `augment.weak_view={t_lo,t_max}`의 고정 약한 범위로 생성한다.
+키가 없으면 기존3뷰 경로를 유지한다. [실험 명세](docs/experiments/weak_student_view/OPTUNA_SPEC.md).
+
 # 현재 실험의 학습 방법
 
 `train.teacher_input: ema`는 teacher 자체의 EMA word embedding을 clean 입력으로 사용한다.
