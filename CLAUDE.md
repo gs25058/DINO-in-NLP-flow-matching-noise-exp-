@@ -2,7 +2,8 @@
 
 [context_teacher 명세](docs/experiments/context_teacher/OPTUNA_SPEC.md)를 따른다.
 teacher가 5..7문장 창 안의 clean B를 읽고 B 토큰만 pooling, student는 모든 arm에서 solo noisy B다.
-조건 차이는 `context.teacher_mode`(none/real/unrelated) 하나이고 고정 hyperparameter로 3seed paired 비교한다.
+조건 차이는 `context.teacher_mode`(none/real/unrelated) 하나다. 명세 개정에 따라 arm별 독립 Optuna
+(12trial, lockstep) → top3 3seed 확인 → C_matched_B 대조로 실행한다(`--design tuned`).
 아래 context_distill은 완료(B−C≈0)된 직전 실험이다.
 
 # 직전 요청: 문맥 비대칭 자기증류
