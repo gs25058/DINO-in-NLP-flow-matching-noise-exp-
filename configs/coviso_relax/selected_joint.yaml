@@ -1,0 +1,84 @@
+model:
+  backbone: bert-base-uncased
+  pooling: mean
+  head:
+    logit_dim: 8192
+    bottleneck_dim: 256
+train:
+  batch_size: 32
+  max_steps: 4000
+  optimizer: adamw
+  lr: 6.545727532374416e-05
+  weight_decay: 0.13821244390893206
+  scheduler: warmup_cosine
+  warmup_frac: 0.08771058784538847
+  teacher_momentum: 0.997
+  momentum_start: 0.997
+  momentum_end: 0.9981343830152652
+  head_lr: 0.00039969567127027346
+  exclude_ln_bias_wd: true
+  grad_clip: 5.337049917615548
+  momentum_ramp_frac: 0.34038897874030694
+  momentum_shape: cosine
+  data_order: epoch
+  batch_views: true
+  tf32: true
+  record_components: true
+  record_provenance: true
+  component_grad_steps:
+  - 0
+  - 56
+  - 250
+  - 1000
+  - 2000
+  - 3000
+  - 3999
+data:
+  sentences_path: data/sentences.jsonl
+  rank_eval_path: data/rank_eval_sentences.jsonl
+  embed_stats_path: data/embed_stats_bert_base_uncased.pt
+  max_tokens: 128
+eval:
+  every_steps: 250
+  log_every_steps: 10
+  batch_kl_pairs: 256
+  save_best: true
+logging:
+  backend: wandb
+  wandb_mode: disabled
+run_name: r18_bert_joint_optuna_selected_s42
+seed: 42
+augment:
+  kind: flow_noise
+  mode: anchor
+  num_student_views: 3
+  t_lo: 0.4664484163749474
+  t_start: 0.5135244395476658
+  t_max: 0.901954744114874
+  warmup_frac: 0.0019071258426626332
+  delta_t: 0.1
+  time_embed: false
+  token_latent_views: 0
+loss:
+  warmup_teacher_temp: 0.05837008069937486
+  teacher_temp: 0.12506484413951288
+  teacher_temp_warmup_frac: 0.16719777593815738
+  student_temp: 0.12655703783527755
+  center_momentum: 0.9187320587014133
+  velocity_head: false
+  velocity_lambda: 0.05
+  cov_iso_lambda: 5.874093568592943
+  cov_ema_momentum: 0.7879439828646531
+  cov_iso_start_step: 56
+  teacher_temp_shape: cosine
+  ibot_lambda: 0.0
+  token_latent_lambda: 0.0
+  cov_iso_mean_lambda: 1.4948540903362064
+  cov_iso_cov_lambda: 2.247944015207464
+collapse_guard:
+  enabled: false
+experiment:
+  selection_campaign: /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_joint_optuna_20261028
+  selected_trial: 13
+  selected_from_dev_only: true
+  recommended: false
