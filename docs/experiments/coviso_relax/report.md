@@ -1,69 +1,141 @@
-# 공분산 정규화 완화·성분 분리 — 실행 보고서
+# 공동 Optuna 최적화 — 실행 보고서
 
-상태: **고정 매트릭스 중단 — 공동 Optuna로 전환 준비**. campaign: `/src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028`.
-완료 control 두 시드는 보존한다. both1 두 시드는 사용자 지시로 중단했으며, 완료 결과로 사용하지 않는다.
-현재 탐색 설계는 OPTUNA_SPEC.md를 따른다. 아래는 중단 시점의 대조군 기록이다.
-사전 등록은 SPEC.md이며, test 점수는 설정/후보 선택에 사용하지 않는다.
+상태: **complete**. `/src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_joint_optuna_20261028`.
 
-## 기준선과 실행 소스
+사용자 지시로 수동 성분 매트릭스를 공동 성능 최적화로 대체했다. 사전 등록: OPTUNA_SPEC.md.
+여러 축을 함께 바꾸므로 특정 정규화 항의 인과 효과를 이 결과로 판정하지 않는다.
 
-실제 R18 원격 기준선 `eed56a1a9f669129a8dbd428443f563ccec35074`; λ₀=5.874093568592943.
-작업 시작 commit `e7ee9d0042452c43327580bb90d1a823babf9604`, branch `exp/coviso-component-relaxation`.
-실행한 전체 소스·변경 내역·파일 해시는 campaign의 source/, source_manifest.json, source_diff.patch에 보존한다.
-R18 과거 STS-B dev 0.7465 / STS7 66.09는 참고값이며, 현 A6000 대조군과 직접 동등하다고 가정하지 않는다.
+실행 소스: `e1d2ea33339e8040fbbcdfd97d8b984df51779d2`, branch `exp/coviso-component-relaxation`.
+기준선 원격 소스: `eed56a1a9f669129a8dbd428443f563ccec35074`.
+실제 R18 대조군 λ₀=5.874093568592943 (재구성 기준선 아님).
+실제 명령·exit code: campaign의 commands/ 및 status/. 실행 소스와 diff: source_manifest.json, source_diff.patch, source/.
+기존 control 42/43은 핵심 소스·resolved config·데이터 해시·4000-step 완료를 확인하고 재사용했다.
+trial 상태: `{"RUNNING": 0, "COMPLETE": 26, "PRUNED": 14, "FAIL": 0, "WAITING": 0}`. 최대 예산 `40` (pruned/failed/기준선 포함).
 
-## 시드별 dev 및 진단 (실측)
+## seed42 탐색 결과 (완주 trial만 후보 자격)
 
-| arm | seed | best dev | best loop step | last dev | alignment last | uniformity last | rank last |
-|---|---|---|---|---|---|---|---|
-| control | 42 | 0.736902 | 2750 | 0.732824 | 0.270792 | -3.295936 | 322.75 |
-| control | 43 | 0.738153 | 3000 | 0.736416 | 0.265249 | -3.204976 | 309.48 |
+| trial | state | dev best | dev last | best step |
+|---|---|---|---|---|
+| 0 | COMPLETE | 0.7369020822480099 | 0.7328244811510823 | 2750 |
+| 1 | COMPLETE | 0.7110287802195248 | 0.7095463741621394 | 3250 |
+| 2 | COMPLETE | 0.633034207755806 | 0.5159393832399789 | 750 |
+| 3 | COMPLETE | 0.6160394463536901 | 0.5558000851868315 | 1000 |
+| 4 | COMPLETE | 0.6284902253976571 | 0.6056205857950511 | 1500 |
+| 5 | COMPLETE | 0.6156887493708969 | 0.6114228067876549 | 1000 |
+| 6 | COMPLETE | 0.6439740491252072 | 0.337147271317613 | 750 |
+| 7 | COMPLETE | 0.666842469297405 | 0.6663023632034065 | 3750 |
+| 8 | COMPLETE | 0.6472404706096792 | 0.6288142187439051 | 2250 |
+| 9 | COMPLETE | 0.6787664247217281 | 0.5096043213407567 | 1000 |
+| 10 | COMPLETE | 0.6527880666246393 | 0.597187970170264 | 500 |
+| 11 | COMPLETE | 0.6665665701144426 | 0.3896687148151396 | 250 |
+| 12 | COMPLETE | 0.6762410274387797 | 0.6756635455767385 | 3500 |
+| 13 | COMPLETE | 0.7371623585200741 | 0.7367817662609707 | 3500 |
+| 14 | COMPLETE | 0.7088529962801058 | 0.7051080315115734 | 2500 |
+| 15 | COMPLETE | 0.6783411488022063 | 0.6270567017666016 | 2000 |
+| 16 | PRUNED |  |  |  |
+| 17 | PRUNED |  |  |  |
+| 18 | COMPLETE | 0.7197824484426446 | 0.7197824484426446 | 3999 |
+| 19 | COMPLETE | 0.7050306785295043 | 0.7031404753514302 | 3250 |
+| 20 | PRUNED |  |  |  |
+| 21 | PRUNED |  |  |  |
+| 22 | COMPLETE | 0.6824716530984765 | 0.6516799840888751 | 1250 |
+| 23 | COMPLETE | 0.6775441846151683 | 0.6471615268665232 | 1000 |
+| 24 | PRUNED |  |  |  |
+| 25 | PRUNED |  |  |  |
+| 26 | PRUNED |  |  |  |
+| 27 | PRUNED |  |  |  |
+| 28 | PRUNED |  |  |  |
+| 29 | PRUNED |  |  |  |
+| 30 | PRUNED |  |  |  |
+| 31 | COMPLETE | 0.6855608500238523 | 0.6826457394064858 | 2250 |
+| 32 | COMPLETE | 0.7049716139618102 | 0.7029641054988881 | 3000 |
+| 33 | PRUNED |  |  |  |
+| 34 | COMPLETE | 0.735407156509408 | 0.734633475441858 | 3750 |
+| 35 | PRUNED |  |  |  |
+| 36 | PRUNED |  |  |  |
+| 37 | COMPLETE | 0.7039908937373626 | 0.2172158071765712 | 750 |
+| 38 | COMPLETE | 0.7041361049574743 | 0.276934458818675 | 250 |
+| 39 | COMPLETE | 0.6946875303693524 | 0.6859048714020236 | 1250 |
 
-## 평균과 시드 변동
+trial별 정확한 19개 값은 trials.json, resolved config는 configs/ 및 각 run의 resolved.yaml에 기록한다.
+진단은 각 로그의 components.jsonl·gradient_diagnostics.jsonl·evaluations.jsonl에 있다.
 
-표준편차는 표본 SD이며 신뢰구간이 아니다.
+## 추가 시드 검증
 
-| arm | n | best mean ± SD | last mean ± SD |
+| 설정 | seed | best dev | last dev | alignment last | uniformity last | effective rank last |
+|---|---|---|---|---|---|---|
+| control | 42 | 0.736902 | 0.732824 | 0.27079 | -3.29594 | 322.75 |
+| control | 43 | 0.738153 | 0.736416 | 0.26525 | -3.20498 | 309.48 |
+| control | 44 | 0.741744 | 0.741744 | 0.25426 | -3.35742 | 326.96 |
+| t0 | 42 | 0.736902 | 0.732824 | 0.27079 | -3.29594 | 322.75 |
+| t0 | 43 | 0.738153 | 0.736416 | 0.26525 | -3.20498 | 309.48 |
+| t0 | 44 | 0.741744 | 0.741744 | 0.25426 | -3.35742 | 326.96 |
+| t13 | 42 | 0.737162 | 0.736782 | 0.32516 | -3.50163 | 332.61 |
+| t13 | 43 | 0.735175 | 0.734014 | 0.32530 | -3.46502 | 337.09 |
+| t13 | 44 | 0.744721 | 0.743801 | 0.33001 | -3.50188 | 337.64 |
+| t34 | 42 | 0.735407 | 0.734633 | 0.27765 | -3.44509 | 341.71 |
+| t34 | 43 | 0.735003 | 0.733377 | 0.29417 | -3.42826 | 338.07 |
+| t34 | 44 | 0.711059 | 0.711059 | 0.28668 | -3.25346 | 341.56 |
+
+| 설정 | n | best mean ± sample SD | last mean ± sample SD |
 |---|---|---|---|
-| control | 2 | 0.737527 ± 0.000884 | 0.734620 ± 0.002539 |
+| control | 3 | 0.738933 ± 0.002514 | 0.736995 ± 0.004488 |
+| t0 | 3 | 0.738933 ± 0.002514 | 0.736995 ± 0.004488 |
+| t13 | 3 | 0.739019 ± 0.005037 | 0.738199 ± 0.005045 |
+| t34 | 3 | 0.727156 ± 0.013942 | 0.726356 ± 0.013263 |
 
-## 손실 성분과 backbone gradient
+최종 후보: trial `13`. 판정: **판정불가**.
+paired best 평균 Δ=0.000086.
+선택은 3시드 dev만 사용했고 selection.json을 동결한 뒤 test 평가를 시작했다.
+재사용 기준선: configs/coviso_relax/control.yaml. 선택 조합: configs/coviso_relax/selected_joint.yaml.
 
-가중 기여는 loss 절대값이며 영향력은 별도 gradient 진단과 함께 본다.
+## STS7 test (선택 후 측정, ×100)
 
-| arm | seed | L_DINO last | L_mean last | L_cov last | weighted mean | weighted cov | g_mean/g_DINO | g_cov/g_DINO |
+| 설정/seed/checkpoint | STS12 | STS13 | STS14 | STS15 | STS16 | STS-B | SICK-R | 평균 |
 |---|---|---|---|---|---|---|---|---|
-| control | 42 | 8.970794 | 0.005889 | 0.006789 | 0.034590 | 0.039877 | 1.1915 | 0.2968 |
-| control | 43 | 8.972128 | 0.005900 | 0.007393 | 0.034658 | 0.043426 | 1.4397 | 0.3087 |
+| control_s42_best | 57.570 | 69.740 | 57.577 | 70.080 | 69.637 | 66.969 | 66.775 | 65.478 |
+| control_s42_last | 57.951 | 70.770 | 57.861 | 69.976 | 70.251 | 67.274 | 65.921 | 65.715 |
+| control_s43_best | 58.446 | 71.693 | 57.248 | 70.090 | 70.174 | 65.836 | 63.662 | 65.307 |
+| control_s43_last | 59.150 | 72.926 | 57.918 | 69.802 | 70.549 | 66.726 | 63.357 | 65.776 |
+| control_s44_best | 58.620 | 72.359 | 58.500 | 71.956 | 70.853 | 67.119 | 64.606 | 66.288 |
+| control_s44_last | 58.620 | 72.359 | 58.500 | 71.956 | 70.853 | 67.119 | 64.606 | 66.288 |
+| t13_s42_best | 56.447 | 74.823 | 61.780 | 73.572 | 72.414 | 68.452 | 64.289 | 67.397 |
+| t13_s42_last | 56.502 | 74.961 | 61.804 | 73.681 | 72.474 | 68.459 | 64.178 | 67.437 |
+| t13_s43_best | 56.757 | 74.281 | 59.918 | 73.285 | 72.816 | 67.850 | 63.731 | 66.948 |
+| t13_s43_last | 56.288 | 74.096 | 59.748 | 73.192 | 72.760 | 67.766 | 63.557 | 66.772 |
+| t13_s44_best | 57.566 | 74.260 | 59.892 | 72.763 | 72.513 | 67.819 | 63.812 | 66.946 |
+| t13_s44_last | 57.551 | 74.360 | 59.960 | 72.813 | 72.437 | 67.665 | 63.617 | 66.915 |
 
-시간에 따른 변화는 각 run의 components.jsonl / gradient_diagnostics.jsonl / evaluations.jsonl에 보존한다.
+control_best: n=3, 평균 65.691, sample SD 0.524.
 
-가설 판정: **판정불가(고정 매트릭스 미완료)**.
+control_last: n=3, 평균 65.926, sample SD 0.315.
 
-## STS7 (설정 동결 후 test)
+t13_best: n=3, 평균 67.097, sample SD 0.260.
 
-| arm | seed | checkpoint | STS7 (%) |
-|---|---|---|---|
-| 미실행 | — | — | — |
+t13_last: n=3, 평균 67.041, sample SD 0.350.
 
-## 실제 명령과 완료 상태
+## 마지막 step 손실과 backbone gradient norm
 
-- `train_both1_s42` exit=실행 중/미완료
-  `/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/source/scripts/gpu_guard.py --gpu 6 --wait --timeout 7200 -- /src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 -m src.train --config /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/configs/both1_s42.yaml --device cuda`
-- `train_both1_s43` exit=실행 중/미완료
-  `/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/source/scripts/gpu_guard.py --gpu 9 --wait --timeout 7200 -- /src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 -m src.train --config /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/configs/both1_s43.yaml --device cuda`
-- `train_control_s42` exit=0
-  `/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/source/scripts/gpu_guard.py --gpu 6 --wait --timeout 7200 -- /src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 -m src.train --config /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/configs/control_s42.yaml --device cuda`
-- `train_control_s43` exit=0
-  `/src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/source/scripts/gpu_guard.py --gpu 9 --wait --timeout 7200 -- /src/gs25058/noise_experiment/noise_experiment/flowdino/.venv/bin/python3 -m src.train --config /src/gs25058/noise_experiment/noise_experiment/flowdino/results/experiments/coviso_relax_20261028/configs/control_s43.yaml --device cuda`
+gradient는 각 가중치를 적용한 항을 독립 미분한 값이며 벡터 방향이 달라 norm의 합이 총 norm은 아니다.
 
-## 구현 검증
+| 설정/seed | DINO | mean raw | cov raw | mean 기여 | cov 기여 | g DINO | g mean | g cov |
+|---|---|---|---|---|---|---|---|---|
+| control/s42 | 8.97079 | 0.00588856 | 0.00678855 | 0.0345899 | 0.0398766 | 0.140381 | 0.167257 | 0.0416627 |
+| control/s43 | 8.97213 | 0.00590021 | 0.00739275 | 0.0346584 | 0.0434257 | 0.112221 | 0.161559 | 0.0346439 |
+| control/s44 | 8.97528 | 0.00536309 | 0.00695401 | 0.0315033 | 0.0408485 | 0.14778 | 0.177663 | 0.0310316 |
+| t0/s42 | 8.97079 | 0.00588856 | 0.00678855 | 0.0345899 | 0.0398766 | 0.140381 | 0.167257 | 0.0416627 |
+| t0/s43 | 8.97213 | 0.00590021 | 0.00739275 | 0.0346584 | 0.0434257 | 0.112221 | 0.161559 | 0.0346439 |
+| t0/s44 | 8.97528 | 0.00536309 | 0.00695401 | 0.0315033 | 0.0408485 | 0.14778 | 0.177663 | 0.0310316 |
+| t13/s42 | 8.98895 | 0.00686925 | 0.00763214 | 0.0102685 | 0.0171566 | 0.0686668 | 0.0656317 | 0.01675 |
+| t13/s43 | 8.98691 | 0.00677842 | 0.00836488 | 0.0101328 | 0.0188038 | 0.0556818 | 0.0671028 | 0.0130077 |
+| t13/s44 | 8.99007 | 0.00687978 | 0.00797947 | 0.0102843 | 0.0179374 | 0.0641766 | 0.0613517 | 0.0118593 |
+| t34/s42 | 8.98034 | 0.00573519 | 0.00683254 | 0.0255802 | 0.0347851 | 0.0805341 | 0.10854 | 0.0298931 |
+| t34/s43 | 8.97702 | 0.00610319 | 0.00737381 | 0.0272216 | 0.0375407 | 0.063102 | 0.110149 | 0.0227932 |
+| t34/s44 | 8.98085 | 0.00564523 | 0.00703014 | 0.025179 | 0.0357911 | 0.113254 | 0.120895 | 0.0228454 |
 
-변경 전 94개, 변경 후 106개 CPU 테스트 통과.
-기존 수치·기울기·EMA 순서와 횟수, 가중치 0, teacher/EMA detach, 감쇠 경계, 단일 학습 루프와 best/last 저장을 검사했다.
-별도 GPU 스모크: `results/experiments/coviso_relax_smoke_20261028`. control/cov1 60 step 정상 종료, 동일 초기 student 해시 확인.
-스모크는 4000-step 스케줄을 유지했으며 본 실험 표에는 포함하지 않았다.
+## 해석과 남은 제약
 
-남은 교락: 현재 서버/라이브러리와 과거 R18 환경 차이, 2~3시드의 표본 한계.
-공통 초기값·학습 스케줄·데이터·평가를 고정한 범위에서만 가중치 효과를 해석한다.
-uniformity와 rank는 진단 지표이며 SimCSE 수치를 목표로 강제하지 않았다.
+R18 과거 dev 약0.7465, 7-task 약66.09는 참고 기록이다. 현재 환경의 대조군을 비교 기준으로 사용한다.
+노이즈 강도·최적화·EMA가 함께 바뀌므로 어느 단일 성분 완화의 인과 효과인지는 미확인이다.
+alignment/uniformity/rank는 진단 지표다. 손실의 절대 크기만으로 지배 항을 판단하지 않는다.
+미완주 trial 및 미평가 test 결과를 추정치로 채우지 않는다.
