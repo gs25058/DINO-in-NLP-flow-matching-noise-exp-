@@ -1,8 +1,8 @@
 {
   "before_tests": 111,
   "after_tests": {
-    "passed": 117,
-    "seconds": 127.16
+    "passed": 118,
+    "seconds": 64.09
   },
   "regression": "ContextViews outputs for mode none/real/unrelated bitwise identical to HEAD 14db227 with teacher_mode default (tiny 2-layer BERT, CPU)",
   "data_counts": {
@@ -30,5 +30,10 @@
   },
   "data_preparation_command": "CUDA_VISIBLE_DEVICES= uv run --no-sync python scripts/prepare_context_data.py --raw-shard data/context_raw/20231101.en/train-00000-of-00041.parquet --out-dir data/context_wikipedia_v2 --window --max-documents 40000",
   "preprocess_source_sha256": "fc5de7ad4edd3122f592c471b52ff4e416bac566085aec2b0126f17f6b6c4b56",
-  "gpu_guard_fix": "vanished-PID snapshot now waits and re-snapshots instead of crashing (cause of context_distill_20261110 stop)"
+  "gpu_guard_fix": "vanished-PID snapshot now waits and re-snapshots instead of crashing (cause of context_distill_20261110 stop)",
+  "fixed_campaign": {
+    "campaign": "results/experiments/context_teacher_20261115",
+    "smoke": "passed A/B/C 60 steps, matched student B noise, matched B/C teacher lengths",
+    "stopped": "user requested per-arm tuning; no full run completed, no test seen"
+  }
 }

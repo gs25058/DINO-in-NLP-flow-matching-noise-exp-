@@ -398,3 +398,57 @@ def test_context_teacher_protocol_pairs_arms_by_seed_and_freezes_before_test(tmp
     monkeypatch.setattr(p,'execute_train',train_bad)
     with pytest.raises(RuntimeError):runner.run(bad,m2)
     assert read_json(bad/'state.json')['stage']=='failed'
+
+
+def test_context_teacher_tuned_design_gives_every_arm_an_equal_independent_search(tmp_path,monkeypatch):
+    from scripts import run_context_teacher as runner
+    from src.provenance import prepare,write_json,read_json
+    from src.train import load_config
+    p=runner.p;c=tmp_path/'campaign'
+    m=prepare(c,p.ROOT,['auto','auto'],tmp_path/'report.md',experiment_dir='context_teacher')
+    m.update(protocol='context_teacher',design='tuned');write_json(c/'source_manifest.json',m)
+    calls=[]
+    def train(campaign,manifest,children,gpu,cfg,label,seed,smoke=False):
+        path,resolved=p.save_config(campaign,manifest,cfg,label,seed)
+        calls.append((label,seed,smoke,cfg))
+        mode=cfg['context']['teacher_mode']
+        # Arm-specific optimum so independent studies must find different points.
+        best={'none':5e-5,'real':1e-4,'unrelated':4e-5}[mode]
+        score=.7-abs(cfg['train']['lr']-best)*100+seed*1e-6
+        log=campaign/'results/logs'/resolved['run_name'];log.mkdir(parents=True,exist_ok=True)
+        write_json(log/'context_first_views.json',{'center_noise_sha256':[f'noise{seed}']*3,'center_token_sha256':f'B{seed}',
+            'third_padded_length':10,'teacher_tokens':10 if mode=='none' else 40,'teacher_padded_length':10 if mode=='none' else 40})
+        return {'run_name':resolved['run_name'],'config':str(path),'seed':seed,'label':label,
+            'metrics':{'best_sts':score,'last_sts':score-.001,'completed_steps':60 if smoke else 4000},
+            'initial_student_sha256':f'full{seed}','initial_shared_sha256':f'shared{seed}','architecture':8192,
+            'first_views':None,'batch_order':{'sha256':f'order{seed}'},'data':{'sentences':{'sha256':'same'}}}
+    evaluated=[]
+    def evaluate(campaign,manifest,groups,children):
+        selection=read_json(campaign/'selection.json')
+        assert selection['test_scores_seen'] is False
+        assert set(groups)=={'A','B','C','C_matched_B'}
+        for seed in ('101','102','103'):
+            b=load_config(groups['B'][seed]['config']);cc=load_config(groups['C_matched_B'][seed]['config'])
+            assert cc['context']['teacher_mode']=='unrelated' and b['context']['teacher_mode']=='real'
+            for cfg in (b,cc):cfg.pop('run_name');cfg.pop('experiment');cfg['context'].pop('teacher_mode')
+            assert b==cc
+        evaluated.append(True)
+    monkeypatch.setattr(p,'execute_train',train);monkeypatch.setattr(p,'evaluate',evaluate)
+    monkeypatch.setattr(p,'set_stage',p.set_stage);monkeypatch.setattr(p,'render',p.render)
+    monkeypatch.setattr(runner.signal,'signal',lambda *args:None)
+    runner.run(c,m)
+    assert read_json(c/'state.json')['stage']=='complete' and evaluated
+    labels=[label for label,_,smoke,_ in calls if not smoke]
+    for arm in 'ABC':
+        assert sum(l.startswith(f'search_{arm}_') for l in labels)==runner.TRIALS
+        assert sum(l.startswith(f'confirm_{arm}_') for l in labels)==9
+    assert labels.count('matched_C_B')==3 and len(calls)==3+3*runner.TRIALS+27+3
+    search=read_json(c/'search.json')
+    anchor=runner.anchor(load_config(p.ROOT/'configs/context_teacher/base.yaml'))
+    for arm in 'ABC':
+        assert search[arm]['0']['params']==anchor
+    # Independent studies: after the shared anchor and startup, arms explore different points.
+    assert search['A']['5']['params']!=search['B']['5']['params']
+    sel=read_json(c/'selection.json')
+    assert sel['C_matched_B_params']==sel['selected_params']['B']
+    assert 'Design: tuned' in (c/'report.md').read_text()

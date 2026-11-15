@@ -42,3 +42,20 @@ B/C teacher 토큰 길이 동일. 그 뒤 A/B/C×seed101..103 =9 full run(seed �
 최대2GPU, gpu_guard admission. 선택 단계 없음(고정 설정)을 test 전에 selection.json에 기록하고,
 best/last checkpoint STS7 18 eval. test 결과로 설정·범위를 바꾸지 않는다. 기존 test 점수를 본 적 있음을 공개.
 총예산: smoke3 + full9 + eval18. 미실행은 추정하지 않는다.
+
+## 개정 (2026-11-15, 사용자 요청): arm별 독립 Optuna (design=tuned)
+
+고정 설정은 A에 맞춘 값이라 B/C에 불공정하다는 지적으로, 고정 설계 캠페인
+context_teacher_20261115는 첫 full run 도중(완료 run 없음, test 미관찰) 중단했다. 산출물은 보존한다.
+고정 설계 코드는 `--design fixed`로 남기고, 새 캠페인은 `--design tuned`로 실행한다.
+
+- arm마다 독립 TPE study(같은 공간·예산·sampler seed20261115, startup4, multivariate, NopPruner).
+  탐색3축: backbone LR=[3.4382e−5,1.3753e−4] log, head LR=[2.9124e−4,1.1650e−3] log, β=[.25,2] log
+  (context_distill과 같은 범위; student 문맥이 없어 weak_t_max는 쓰지 않는다).
+- 첫 trial은 세 arm 모두 조합1(anchor). 같은 seed라 startup 무작위 점도 세 arm이 같고 TPE부터 갈라진다.
+- lockstep: 모든 arm의 trial n이 tell된 뒤에만 trial n+1을 ask한다. arm당12trial×4000step, seed42.
+- arm별 search dev top3를 seed101/102/103으로 확인(27run), 새3seed dev-best 평균으로 arm별 설정 동결.
+- 인과 대조: B 선택 설정 그대로의 C(C_matched_B)3run.
+- 판정(STS7 test, dev-best checkpoint, seed paired): 주비교는 각자 튜닝된 B vs C(사용자가 요청한 공정 비교),
+  보조로 B vs C_matched_B(같은 hyperparameter), B vs A를 같은 규칙(평균≥.003·2/3 양수 성립)으로 보고.
+- 예산: smoke3 + search36 + confirm27 + matched3 = 69 run, 그 뒤 best/last STS7 24 eval. 최대2GPU.
