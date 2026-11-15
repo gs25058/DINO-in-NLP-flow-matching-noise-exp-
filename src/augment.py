@@ -1,5 +1,3 @@
-"""Independent flow-noise student views and an unchanged, clean teacher view."""
-
 from dataclasses import dataclass
 
 import torch
@@ -30,11 +28,6 @@ class FlowNoiseAug:
         return self.t_start + (self.t_max - self.t_start) * progress
 
     def __call__(self, token_embeds, special_mask, step) -> NoiseViews:
-        """x̂=(x−μ)/σ; x'=[(1−t)x̂+tε]σ+μ. CLS/SEP/pad keep their input.
-
-        Draw t[B], then ε[B,L,D], separately for each view. This order is part
-        of the experiment's RNG trajectory, including at noise level zero.
-        """
         batch, length, dim = token_embeds.shape
         device, dtype = token_embeds.device, token_embeds.dtype
         mu = self.mu.to(device=device, dtype=dtype)
