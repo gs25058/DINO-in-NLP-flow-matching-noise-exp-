@@ -43,7 +43,7 @@ def set_stage(campaign, stage, **extra):
 def save_config(campaign, manifest, base, label, seed):
     cfg = copy.deepcopy(base)
     protocol = manifest.get("protocol", "bottleneck_cosine")
-    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino", "full_ema_joint": "full_ema", "weak_student_view": "weakview", "context_distill": "context"}.get(protocol, "bneckcos")
+    prefix = {"bottleneck_iso": "bneckiso", "bottleneck_dino": "bneckdino", "full_ema_joint": "full_ema", "weak_student_view": "weakview", "context_distill": "context", "context_teacher": "ctxteacher"}.get(protocol, "bneckcos")
     cfg.update(seed=seed, run_name=f"{prefix}_{campaign.name}_{label}_s{seed}")
     for key in ("sentences_path", "rank_eval_path", "embed_stats_path", "context_manifest_path", "context_heldout_path"):
         if key not in cfg["data"]:

@@ -191,7 +191,7 @@ class Trainer:
             with (root / data["sentences_path"]).open() as stream:
                 self.sentences = [json.loads(line) for line in stream]
             for row in self.sentences:
-                validate_row(row)
+                validate_row(row, cfg["context"].get("side_budget", 48))
             self.context_views = ContextViews(cfg["context"], self.tokenizer, self.augment, cfg["seed"], device)
         self.objective = DINOObjective(
             loss,
@@ -473,8 +473,10 @@ class Trainer:
             if getattr(self, "context_views", None) is not None:
                 info = self.context_step_info
                 total_tokens += 2 * info["solo_tokens"] + info["third_tokens"]
-                teacher_tokens += info["solo_tokens"]
-                padded_tokens += len(indices) * (3 * info["solo_padded_length"] + info["third_padded_length"])
+                teacher_tokens += info["teacher_tokens"]
+                padded_tokens += len(indices) * (
+                    2 * info["solo_padded_length"] + info["teacher_padded_length"] + info["third_padded_length"]
+                )
             gradients = self.optimize(result, step)
             logging_step = step % evaluation["log_every_steps"] == 0 or step == steps - 1
             if logging_step:

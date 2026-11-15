@@ -1,4 +1,4 @@
-"""Prepare fixed-revision Wikipedia document triples and shared B embedding statistics."""
+"""Prepare fixed-revision Wikipedia document triples (or --window 5..7-sentence windows) and B statistics."""
 import argparse
 import hashlib
 import json
@@ -15,6 +15,7 @@ def main():
     p.add_argument('--max-documents',type=int,default=20000)
     p.add_argument('--max-train',type=int,default=150000)
     p.add_argument('--backbone',default='bert-base-uncased')
+    p.add_argument('--window',action='store_true',help='B plus 2..3 whole same-paragraph sentences per side')
     args=p.parse_args()
     import pyarrow.parquet as pq
     from transformers import AutoTokenizer,AutoModel
@@ -27,7 +28,8 @@ def main():
     manifest=prepare_cache(documents(),tokenizer,args.out_dir,{
         'dataset':DATASET,'revision':REVISION,'shard':SHARD,'licenses':['cc-by-sa-3.0','gfdl'],
         'raw_file':str(args.raw_shard.resolve()),'raw_sha256':hashlib.file_digest(args.raw_shard.open('rb'),'sha256').hexdigest(),
-        'tokenizer':args.backbone},args.max_documents,args.max_train)
+        'tokenizer':args.backbone},args.max_documents,args.max_train,
+        {'min_side':2,'max_side':3,'side_budget':160} if args.window else None)
     # Statistics documents are disjoint from training and context diagnostics.
     stats=[json.loads(line)['B'] for line in (args.out_dir/'stats.jsonl').open()][:10000]
     model=AutoModel.from_pretrained(args.backbone).eval()

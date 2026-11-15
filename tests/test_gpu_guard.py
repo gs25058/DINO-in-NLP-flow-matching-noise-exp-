@@ -109,3 +109,52 @@ def test_timeout_stops_only_the_launched_child_and_releases_reservation(
     assert len(children) == 1 and children[0].poll() is not None
     with registry(tmp_path) as rows:
         assert rows == []
+
+
+def test_vanished_process_snapshot_waits_and_admits_nothing_until_clean(
+    tmp_path, monkeypatch, gpus
+):
+    import sys
+
+    from scripts import gpu_guard
+
+    calls = []
+
+    def snapshot():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("cannot establish GPU process owner for PID 1; retry after refreshing")
+        return gpus, []
+
+    monkeypatch.setattr(gpu_guard, "snapshot", snapshot)
+    monkeypatch.setattr(gpu_guard, "registry", lambda _: registry(tmp_path))
+    monkeypatch.setattr(gpu_guard.time, "sleep", lambda _: None)
+    launched = []
+
+    class Child:
+        pid = 12345
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    def launch(*args, **kwargs):
+        assert len(calls) == 2, "admitted on an ambiguous snapshot"
+        launched.append(args)
+        return Child()
+
+    monkeypatch.setattr(gpu_guard.subprocess, "Popen", launch)
+    monkeypatch.setattr(gpu_guard, "stop_child", lambda child: None)
+    monkeypatch.setattr(sys, "argv", ["gpu_guard", "--gpu", "0", "--wait", "--", "true"])
+    term_handler, int_handler = (
+        gpu_guard.signal.getsignal(gpu_guard.signal.SIGTERM),
+        gpu_guard.signal.getsignal(gpu_guard.signal.SIGINT),
+    )
+    try:
+        assert gpu_guard.main() == 0
+    finally:
+        gpu_guard.signal.signal(gpu_guard.signal.SIGTERM, term_handler)
+        gpu_guard.signal.signal(gpu_guard.signal.SIGINT, int_handler)
+    assert len(launched) == 1

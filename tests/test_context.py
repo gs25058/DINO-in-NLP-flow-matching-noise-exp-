@@ -285,3 +285,116 @@ def test_paired_context_protocol_uses_same_points_budget_and_freezes_before_test
         for cfg in configs:
             cfg.pop('run_name');cfg.pop('experiment');cfg['context'].pop('mode')
         assert configs[0]==configs[1]==configs[2]
+
+
+def test_windows_use_two_or_three_whole_same_paragraph_sentences_per_side():
+    from src.context_data import windows_from_document
+    sentences=[f'This sentence number {i} contains distinct words.' for i in range(9)]
+    text='Title\n'+' '.join(sentences)+'\nShort paragraph one. Short paragraph two. Short paragraph three. Short four.\n'
+    rows=windows_from_document({'id':'doc','text':text},Tokenizer())
+    assert [r['window_sentences'] for r in rows]==[6,7,7,7,6]
+    for r in rows:
+        spans=r['source_positions']
+        assert len(spans)==r['window_sentences'] and '\n' not in text[spans[0][0]:spans[-1][1]]
+        assert ' '.join(text[a:b] for a,b in spans)==' '.join(r['left_texts']+[r['B']]+r['right_texts'])
+        assert 2<=len(r['left_texts'])<=3 and 2<=len(r['right_texts'])<=3
+        assert len(r['left_ids'])==sum(len(Tokenizer()([t])['input_ids'][0]) for t in r['left_texts'])
+        assert 'far_left_ids' not in r
+    # A paragraph of 4 sentences cannot give 2 sentences on both sides.
+    assert all('Short' not in r['B'] for r in rows)
+    # The nearest two sentences must fit whole, otherwise B is dropped (no truncation).
+    assert not windows_from_document({'id':'doc','text':text},Tokenizer(),side_budget=13)
+    tight=windows_from_document({'id':'doc','text':text},Tokenizer(),side_budget=14)
+    assert tight and all(r['window_sentences']==5 for r in tight)
+
+
+def test_v2_validation_without_far_arm_and_larger_side_budget():
+    r=row();r.update(left_ids=list(range(3,103)),unrelated_left_ids=list(range(3,103)))
+    for k in ('far_left_ids','far_right_ids','far_sentence_indices'):r.pop(k)
+    with pytest.raises(ValueError):validate_row(r)
+    validate_row(r,160)
+    bad=copy.deepcopy(r);bad['unrelated_right_ids']=bad['unrelated_right_ids'][:-1]
+    with pytest.raises(ValueError):validate_row(bad,160)
+
+
+def test_teacher_context_mode_pools_B_inside_clean_context_and_keeps_student_solo():
+    aug=FlowNoiseAug(torch.zeros(16),torch.ones(16),num_student_views=3,t_lo=.39,t_start=.46,t_max=.88,warmup_steps=10)
+    rows=[row('1'),row('2')];out={}
+    for mode in ('none','real','unrelated'):
+        m=tiny_model();t=EMATeacher(m,.99)
+        views=ContextViews({'mode':'none','teacher_mode':mode,'weak_t_max':.1,'beta':1.},Tokenizer(),aug,42,'cpu')
+        out[mode]=views.forward(m,t,rows,step=3)
+    base=out['none']
+    for mode in ('real','unrelated'):
+        target,embeddings,logits,_,info=out[mode]
+        # Student views are identical solo noisy B; only the teacher target moves.
+        assert all(torch.equal(a,b) for a,b in zip(embeddings,base[1]))
+        assert info['center_noise_sha256']==base[4]['center_noise_sha256']
+        assert info['third_padded_length']==info['solo_padded_length']
+        assert not torch.allclose(target.logits,base[0].logits)
+        assert info['teacher_tokens']>base[4]['teacher_tokens']
+    assert out['real'][4]['teacher_tokens']==out['unrelated'][4]['teacher_tokens']
+    with pytest.raises(ValueError):
+        ContextViews({'mode':'real','teacher_mode':'real','weak_t_max':.1,'beta':1.},Tokenizer(),aug,42,'cpu')
+    with pytest.raises(ValueError):
+        ContextViews({'mode':'none','teacher_mode':'far','weak_t_max':.1,'beta':1.},Tokenizer(),aug,42,'cpu')
+
+
+def test_pack_side_and_total_budgets_are_configurable():
+    r=row();r.update(left_ids=[5]*100,right_ids=[6]*100)
+    with pytest.raises(ValueError):pack([r],Tokenizer(),'real','cpu')
+    b=pack([r],Tokenizer(),'real','cpu',side_budget=160,total_budget=450)
+    assert b.input_ids.shape[1]==1+100+1+4+1+100+1
+    with pytest.raises(ValueError):pack([r],Tokenizer(),'real','cpu',side_budget=160,total_budget=200)
+
+
+def test_context_teacher_protocol_pairs_arms_by_seed_and_freezes_before_test(tmp_path,monkeypatch):
+    from scripts import run_context_teacher as runner
+    from src.provenance import prepare,write_json,read_json
+    from src.train import load_config
+    p=runner.p;c=tmp_path/'campaign'
+    m=prepare(c,p.ROOT,['auto','auto'],tmp_path/'report.md',experiment_dir='context_teacher')
+    m.update(protocol='context_teacher');write_json(c/'source_manifest.json',m)
+    calls=[]
+    def train(campaign,manifest,children,gpu,cfg,label,seed,smoke=False):
+        path,resolved=p.save_config(campaign,manifest,cfg,label,seed)
+        calls.append((label,seed,smoke,cfg))
+        mode=cfg['context']['teacher_mode'];score=.7+seed*1e-6
+        log=campaign/'results/logs'/resolved['run_name'];log.mkdir(parents=True,exist_ok=True)
+        write_json(log/'context_first_views.json',{'center_noise_sha256':[f'noise{seed}']*3,'center_token_sha256':f'B{seed}',
+            'third_padded_length':10,'teacher_tokens':10 if mode=='none' else 40,'teacher_padded_length':10 if mode=='none' else 40})
+        return {'run_name':resolved['run_name'],'config':str(path),'seed':seed,'label':label,
+            'metrics':{'best_sts':score,'last_sts':score-.001,'completed_steps':60 if smoke else 4000},
+            'initial_student_sha256':f'full{seed}','initial_shared_sha256':f'shared{seed}','architecture':8192,
+            'first_views':None,'batch_order':{'sha256':f'order{seed}'},'data':{'sentences':{'sha256':'same'}}}
+    evaluated=[]
+    def evaluate(campaign,manifest,groups,children):
+        assert read_json(campaign/'selection.json')['test_scores_seen'] is False
+        assert set(groups)=={'A','B','C'} and all(set(v)=={'101','102','103'} for v in groups.values())
+        evaluated.append(True)
+    monkeypatch.setattr(p,'execute_train',train);monkeypatch.setattr(p,'evaluate',evaluate)
+    monkeypatch.setattr(p,'set_stage',p.set_stage);monkeypatch.setattr(p,'render',p.render)
+    monkeypatch.setattr(runner.signal,'signal',lambda *args:None)
+    runner.run(c,m)
+    assert read_json(c/'state.json')['stage']=='complete' and evaluated
+    assert sum(smoke for _,_,smoke,_ in calls)==3 and len(calls)==12
+    full=[(label,seed,cfg) for label,seed,smoke,cfg in calls if not smoke]
+    for seed in (101,102,103):
+        configs=[cfg for _,s,cfg in full if s==seed];assert len(configs)==3
+        modes=sorted(cfg['context']['teacher_mode'] for cfg in configs)
+        assert modes==['none','real','unrelated']
+        stripped=[copy.deepcopy(cfg) for cfg in configs]
+        for cfg in stripped:cfg['context'].pop('teacher_mode')
+        assert stripped[0]==stripped[1]==stripped[2]
+        assert all(cfg['context']['mode']=='none' for cfg in configs)
+    # Mismatched teacher layouts between B and C must stop the campaign.
+    bad=tmp_path/'bad';m2=prepare(bad,p.ROOT,['auto','auto'],tmp_path/'r2.md',experiment_dir='context_teacher')
+    m2.update(protocol='context_teacher');write_json(bad/'source_manifest.json',m2)
+    def train_bad(campaign,manifest,children,gpu,cfg,label,seed,smoke=False):
+        r=train(campaign,manifest,children,gpu,cfg,label,seed,smoke)
+        if cfg['context']['teacher_mode']=='unrelated':
+            f=campaign/'results/logs'/r['run_name']/'context_first_views.json';d=read_json(f);d['teacher_tokens']=39;write_json(f,d)
+        return r
+    monkeypatch.setattr(p,'execute_train',train_bad)
+    with pytest.raises(RuntimeError):runner.run(bad,m2)
+    assert read_json(bad/'state.json')['stage']=='failed'

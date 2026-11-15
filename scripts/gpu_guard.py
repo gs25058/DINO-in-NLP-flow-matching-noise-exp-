@@ -158,16 +158,22 @@ def main():
     try:
         while child is None:
             with registry(directory) as rows:
-                gpus, processes = snapshot()
-                selected, reason = select_gpu(
-                    args.gpu,
-                    gpus,
-                    processes,
-                    rows,
-                    pwd.getpwuid(os.getuid()).pw_name,
-                    args.min_free_mib,
-                    args.max_util,
-                )
+                try:
+                    gpus, processes = snapshot()
+                except RuntimeError as exc:
+                    # A GPU process exited between nvidia-smi and ps. Admit nothing
+                    # on an ambiguous snapshot; wait and take a fresh one instead.
+                    selected, reason = None, str(exc)
+                else:
+                    selected, reason = select_gpu(
+                        args.gpu,
+                        gpus,
+                        processes,
+                        rows,
+                        pwd.getpwuid(os.getuid()).pw_name,
+                        args.min_free_mib,
+                        args.max_util,
+                    )
                 if selected is not None:
                     env = dict(
                         os.environ,

@@ -1,6 +1,7 @@
 """Context inputs, independent sentence-noise streams and center-only pooling.
 
-All three experimental arms share this code. Teacher and inference always see B.
+All experimental arms share this code. Inference always sees B alone. The
+teacher sees clean B alone unless ``teacher_mode`` gives it clean context.
 """
 from dataclasses import dataclass
 import hashlib
@@ -25,7 +26,7 @@ class ContextBatch:
         return allowed
 
 
-def pack(rows,tokenizer,mode,device):
+def pack(rows,tokenizer,mode,device,side_budget=48,total_budget=226):
     if mode not in ('none','real','unrelated','far'):raise ValueError('unknown context mode')
     sequences=[];spans=[]
     for row in rows:
@@ -35,7 +36,7 @@ def pack(rows,tokenizer,mode,device):
         else:
             key='' if mode=='real' else mode+'_'
             a,c=row[key+'left_ids'],row[key+'right_ids']
-        if len(a)>48 or len(c)>48:raise ValueError('context budget exceeded')
+        if len(a)>side_budget or len(c)>side_budget:raise ValueError('context budget exceeded')
         if mode=='none':
             ids=[tokenizer.cls_token_id]+b+[tokenizer.sep_token_id]
             labels=[-1]+[1]*len(b)+[-1]
@@ -44,7 +45,7 @@ def pack(rows,tokenizer,mode,device):
             labels=[-1]+[0]*len(a)+[-1]+[1]*len(b)+[-1]+[2]*len(c)+[-1]
         sequences.append(ids);spans.append(labels)
     length=max(map(len,sequences))
-    if length>226:raise ValueError('context exceeds preregistered total budget')
+    if length>total_budget:raise ValueError('context exceeds preregistered total budget')
     ids=torch.full((len(rows),length),tokenizer.pad_token_id,dtype=torch.long,device=device)
     span=torch.full_like(ids,-1);attention=torch.zeros_like(ids)
     for i,(seq,labels) in enumerate(zip(sequences,spans)):
@@ -79,16 +80,22 @@ class ContextViews:
     def __init__(self,cfg,tokenizer,augment,seed,device):
         self.cfg,self.tokenizer,self.augment,self.seed,self.device=cfg,tokenizer,augment,seed,device
         if cfg['mode'] not in ('none','real','unrelated','far'):raise ValueError('invalid context mode')
+        self.teacher_mode=cfg.get('teacher_mode','none')
+        if self.teacher_mode not in ('none','real','unrelated'):raise ValueError('invalid teacher context mode')
+        if self.teacher_mode!='none' and cfg['mode']!='none':raise ValueError('context goes to the teacher or the student, not both')
+        self.side_budget=cfg.get('side_budget',48);self.total_budget=cfg.get('total_budget',226)
         if not 0<=cfg['weak_t_max']<augment.t_lo:raise ValueError('context noise must be weaker than B')
 
     def forward(self,student,teacher,rows,step,mode=None,blocked=False,noise_bounds=None):
         solo=pack(rows,self.tokenizer,'none',self.device)
-        context=pack(rows,self.tokenizer,mode or self.cfg['mode'],self.device)
+        context=pack(rows,self.tokenizer,mode or self.cfg['mode'],self.device,self.side_budget,self.total_budget)
         center=student.get_input_embeddings()(solo.input_ids)
+        # Clean teacher; with teacher_mode it reads B inside clean context, pooling B only.
+        tbatch=solo if self.teacher_mode=='none' else pack(rows,self.tokenizer,self.teacher_mode,self.device,self.side_budget,self.total_budget)
         with torch.no_grad():
-            teacher_embeds=teacher.model.get_input_embeddings()(solo.input_ids)
-            target=teacher(inputs_embeds=teacher_embeds,attention_mask=solo.attention_mask,
-                           pooling_mask=solo.center_pooling_mask,token_type_ids=solo.token_type_ids)
+            teacher_embeds=teacher.model.get_input_embeddings()(tbatch.input_ids)
+            target=teacher(inputs_embeds=teacher_embeds,attention_mask=tbatch.attention_mask,
+                           pooling_mask=tbatch.center_pooling_mask,token_type_ids=tbatch.token_type_ids)
         lo,hi=noise_bounds if noise_bounds is not None else (self.augment.t_lo,self.augment.t_hi(step))
         views=[]
         center_hashes=[]
@@ -122,5 +129,6 @@ class ContextViews:
               'solo_tokens':int(solo.attention_mask.sum()),'third_tokens':int(batch.attention_mask.sum()),
               'solo_padded_length':solo.input_ids.shape[1],
               'third_padded_length':batch.input_ids.shape[1],'third_b_start':[int((s==1).nonzero()[0]) for s in batch.sentence_span_mask],
-              'teacher_clean_sha256':hashlib.sha256(teacher_embeds.float().cpu().numpy().tobytes()).hexdigest() if step == 0 else None}
+              'teacher_clean_sha256':hashlib.sha256(teacher_embeds.float().cpu().numpy().tobytes()).hexdigest() if step == 0 else None,
+              'teacher_tokens':int(tbatch.attention_mask.sum()),'teacher_padded_length':tbatch.input_ids.shape[1]}
         return target,tuple(embeddings),logits,tuple(bottlenecks),info

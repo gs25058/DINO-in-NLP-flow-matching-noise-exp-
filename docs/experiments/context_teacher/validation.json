@@ -1,0 +1,34 @@
+{
+  "before_tests": 111,
+  "after_tests": {
+    "passed": 117,
+    "seconds": 127.16
+  },
+  "regression": "ContextViews outputs for mode none/real/unrelated bitwise identical to HEAD 14db227 with teacher_mode default (tiny 2-layer BERT, CPU)",
+  "data_counts": {
+    "documents_read": 40000,
+    "duplicates": 12,
+    "before_unrelated_matching": {
+      "train": 137304,
+      "stats": 7540,
+      "heldout": 6848
+    },
+    "train": 134777,
+    "stats": 7397,
+    "heldout": 6721
+  },
+  "window": {
+    "min_side": 2,
+    "max_side": 3,
+    "side_budget": 160
+  },
+  "preprocess_version": "context-windows-v2",
+  "window_sentence_distribution_train": {
+    "5": 24099,
+    "6": 65358,
+    "7": 45320
+  },
+  "data_preparation_command": "CUDA_VISIBLE_DEVICES= uv run --no-sync python scripts/prepare_context_data.py --raw-shard data/context_raw/20231101.en/train-00000-of-00041.parquet --out-dir data/context_wikipedia_v2 --window --max-documents 40000",
+  "preprocess_source_sha256": "fc5de7ad4edd3122f592c471b52ff4e416bac566085aec2b0126f17f6b6c4b56",
+  "gpu_guard_fix": "vanished-PID snapshot now waits and re-snapshots instead of crashing (cause of context_distill_20261110 stop)"
+}

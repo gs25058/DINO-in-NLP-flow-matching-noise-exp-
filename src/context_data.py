@@ -88,14 +88,56 @@ def triples_from_document(doc,tokenizer):
     return triples
 
 
-def add_unrelated_context(rows,seed=19):
+WINDOW_VERSION='context-windows-v2'
+
+
+def windows_from_document(doc,tokenizer,min_side=2,max_side=3,side_budget=160):
+    """B plus 2..3 whole same-paragraph sentences per side (5..7 sentences total).
+
+    Context sentences are never truncated: the nearest ``min_side`` sentences of a
+    side must fit ``side_budget`` WordPieces or B is dropped; a farther sentence is
+    added only while it still fits.
+    """
+    rows=[]
+    for paragraph in split_document(doc):
+        if len(paragraph)<2*min_side+1:continue
+        ids=tokenizer([s['text'] for s in paragraph],add_special_tokens=False,truncation=False)['input_ids']
+        for s,tokens in zip(paragraph,ids):s['ids']=tokens
+        for i in range(min_side,len(paragraph)-min_side):
+            b=paragraph[i]
+            if not 3<=len(b['ids'])<=126:continue
+            sides=[]
+            for order in (paragraph[i-1::-1] if i else [],paragraph[i+1:]):
+                chosen=[];used=0
+                for s in order[:max_side]:
+                    if used+len(s['ids'])>side_budget:break
+                    chosen.append(s);used+=len(s['ids'])
+                sides.append(chosen)
+            left,right=sides[0][::-1],sides[1]
+            if min(len(left),len(right))<min_side:continue
+            window=left+[b]+right
+            if min(len(x['text']) for x in window)<10:continue
+            if len({normalized(x['text']) for x in window})!=len(window):continue
+            rows.append({'doc_id':str(doc['id']),'url':doc.get('url',''),'title':doc.get('title',''),
+                'paragraph_id':b['paragraph_id'],'sentence_index':b['sentence_index'],
+                'doc_sentence_index':b['doc_sentence_index'],
+                'A':' '.join(x['text'] for x in left),'B':b['text'],'C':' '.join(x['text'] for x in right),'text':b['text'],
+                'left_texts':[x['text'] for x in left],'right_texts':[x['text'] for x in right],
+                'window_sentences':len(window),
+                'source_positions':[[x['start'],x['end']] for x in window],
+                'center_ids':b['ids'],'left_ids':[t for x in left for t in x['ids']],
+                'right_ids':[t for x in right for t in x['ids']]})
+    return rows
+
+
+def add_unrelated_context(rows,seed=19,candidates_per_row=64):
     """Exact content-length matching, from other documents in this same split."""
     rng=random.Random(seed);matched=[]
     for row in rows:
         l,r=len(row['left_ids']),len(row['right_ids'])
         donors=[]
         # Deterministic bounded rejection; unmatched centers are dropped for every arm.
-        candidates=[rng.randrange(len(rows)) for _ in range(64)]
+        candidates=[rng.randrange(len(rows)) for _ in range(candidates_per_row)]
         for i in candidates:
             d=rows[i]
             if d['doc_id']==row['doc_id']:continue
@@ -113,21 +155,27 @@ def add_unrelated_context(rows,seed=19):
     return matched
 
 
-def validate_row(row):
+def validate_row(row,side_budget=48):
+    """v1 triples carry a far-context arm; v2 windows do not (``far_*`` absent)."""
     if row['unrelated_doc_id']==row['doc_id']:raise ValueError('unrelated context shares document')
     if any(normalized(t)==normalized(row['B']) for t in row['unrelated_texts']+[row['unrelated_center_text']]):
         raise ValueError('unrelated context duplicates center sentence')
-    if any(abs(i-row['doc_sentence_index'])<8 for i in row['far_sentence_indices']):
+    kinds=('unrelated','far') if 'far_sentence_indices' in row else ('unrelated',)
+    if 'far' in kinds and any(abs(i-row['doc_sentence_index'])<8 for i in row['far_sentence_indices']):
         raise ValueError('far context is adjacent')
     for side in ('left','right'):
         n=len(row[f'{side}_ids'])
-        if not 1<=n<=48 or any(len(row[f'{kind}_{side}_ids'])!=n for kind in ('unrelated','far')):
+        if not 1<=n<=side_budget or any(len(row[f'{kind}_{side}_ids'])!=n for kind in kinds):
             raise ValueError('context content lengths differ')
     if not 3<=len(row['center_ids'])<=126:raise ValueError('invalid center length')
 
 
-def prepare_cache(documents,tokenizer,out,source,max_documents=20000,max_train=150000):
-    """Write disjoint document splits, offsets, token IDs and source fingerprints."""
+def prepare_cache(documents,tokenizer,out,source,max_documents=20000,max_train=150000,window=None):
+    """Write disjoint document splits, offsets, token IDs and source fingerprints.
+
+    ``window=None`` keeps the v1 triple cache; a dict of ``windows_from_document``
+    arguments builds the v2 5..7-sentence cache instead.
+    """
     out=Path(out)
     if out.exists():raise FileExistsError('use a new data output directory')
     out.mkdir(parents=True)
@@ -141,18 +189,18 @@ def prepare_cache(documents,tokenizer,out,source,max_documents=20000,max_train=1
         if doc_id in seen_docs or doc_hash in seen_doc_text:counts['duplicates']+=1;continue
         seen_docs.add(doc_id);seen_doc_text.add(doc_hash)
         group=document_split(doc_id)
-        triples=triples_from_document(doc,tokenizer)
+        triples=triples_from_document(doc,tokenizer) if window is None else windows_from_document(doc,tokenizer,**window)
         for row in triples:
             key=digest(normalized(row['B']))
             if key in seen_centers:continue
             seen_centers.add(key)
             row.update(source_row=row_number,source_shard=source['shard'],source_revision=source['revision'])
             if group!='train' or len(groups[group])<max_train:groups[group].append(row)
-    doc_ids={}
+    doc_ids={};counts['before_unrelated_matching']={k:len(v) for k,v in groups.items()}
     for split,rows in groups.items():
-        rows=add_unrelated_context(rows)
+        rows=add_unrelated_context(rows,candidates_per_row=64 if window is None else 256)
         if not rows:raise ValueError(f'no usable {split} triples; supply more source documents')
-        for row in rows:validate_row(row)
+        for row in rows:validate_row(row,48 if window is None else window['side_budget'])
         groups[split]=rows
         doc_ids[split]=sorted({r['doc_id'] for r in rows})
         with (out/f'{split}.jsonl').open('w') as f:
@@ -161,10 +209,11 @@ def prepare_cache(documents,tokenizer,out,source,max_documents=20000,max_train=1
         if set(doc_ids[a])&set(doc_ids[b]):raise AssertionError('document split leakage')
     with (out/'rank_eval_sentences.jsonl').open('w') as f:
         for row in groups['heldout'][:2048]:f.write(json.dumps({'text':row['B']})+'\n')
-    manifest={'source':source,'preprocess_version':PREPROCESS_VERSION,'split':'sha256(doc ID), 90/5/5 train/stats/heldout',
+    manifest={'source':source,'preprocess_version':PREPROCESS_VERSION if window is None else WINDOW_VERSION,'split':'sha256(doc ID), 90/5/5 train/stats/heldout',
         'splitter':'conservative punctuation+capital rule; reject abbreviation/initial/decimal paragraphs; one source line per paragraph',
-        'center_rule':'exclude centers outside 3..126 WordPieces; no center truncation','context_budget':48,
-        'far_min_sentence_distance':8,'max_documents':max_documents,'max_train':max_train,
+        'center_rule':'exclude centers outside 3..126 WordPieces; no center truncation',
+        **({'context_budget':48,'far_min_sentence_distance':8} if window is None else
+           {'window':window,'context_rule':'same paragraph, whole sentences only, no far arm','unrelated_candidates':256}),'max_documents':max_documents,'max_train':max_train,
         'selection':'first source rows, not a representative random Wikipedia sample',
         'counts':{**counts,**{k:len(v) for k,v in groups.items()}},'document_ids':doc_ids,
         'files':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in out.glob('*.jsonl')}}

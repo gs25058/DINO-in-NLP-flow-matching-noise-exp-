@@ -1,0 +1,12 @@
+{
+  "native_lineage": "configs/coviso_relax/base.yaml / full-clean-EMA trial1 via context_distill",
+  "fixed_hyperparameters": "context_distill_20261110 paired combination 1 (A search best, A three-seed confirmed)",
+  "lambda_mean": 5.874093568592943,
+  "lambda_cov": 5.874093568592943,
+  "changes_vs_context_distill": [
+    "context-windows-v2 cache (5..7 same-paragraph sentences)",
+    "context goes to the teacher (context.teacher_mode), student is solo B in every arm",
+    "no optimizer search"
+  ],
+  "historical_scores_reference_only": true
+}
