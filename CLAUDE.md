@@ -3,6 +3,7 @@
 [vocab_proto 명세](docs/experiments/vocab_proto/OPTUNA_SPEC.md)를 따른다. C0=t13 재사용, C1 사전학습 MLM head(학습),
 C2 동결, C3 단어 임베딩 k-means 8192. 조건 차이는 `model.head.head_type/head_freeze`와 조건별 독립 Optuna(40 trial)다.
 키가 없으면 기존 head와 bit-identical이다. [MASK] pooling·BoW anchor·토큰 soft MLM은 범위 밖이다.
+완료(2026-11-17, [결과](docs/experiments/vocab_proto/RESULTS.md)): C1 STS7 best 69.00 vs C0 67.10(P1 성립), 단 best는 step≤1250이고 last는 C0보다 낮다.
 
 # 직전 요청: 문맥을 읽는 teacher (local→global)
 
