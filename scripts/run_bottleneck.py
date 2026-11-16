@@ -67,7 +67,7 @@ def read_yaml(path):
     return yaml.safe_load(path.read_text())
 
 
-def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=False):
+def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=False, trial=None, report="best"):
     path, cfg = save_config(campaign, manifest, base, label, seed)
     log = campaign / "results/logs" / cfg["run_name"]
     completion = log / "completion.json"
@@ -83,6 +83,7 @@ def execute_train(campaign, manifest, children, gpu, base, label, seed, smoke=Fa
             command,
             evaluation_path=log / "evaluations.jsonl",
             expected_initialization=cal.get("initial_student_sha256") if seed == SEARCH_SEED else None,
+            **({"trial": trial, "report": report} if trial is not None else {}),
         )
     metrics = read_json(completion) if smoke else complete_record(completion)
     if smoke and (metrics["status"] != "smoke_complete" or metrics["completed_steps"] != 60):

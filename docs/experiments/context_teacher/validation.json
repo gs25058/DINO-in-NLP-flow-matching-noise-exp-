@@ -1,8 +1,8 @@
 {
   "before_tests": 111,
   "after_tests": {
-    "passed": 118,
-    "seconds": 64.09
+    "passed": 122,
+    "seconds": 85.58
   },
   "regression": "ContextViews outputs for mode none/real/unrelated bitwise identical to HEAD 14db227 with teacher_mode default (tiny 2-layer BERT, CPU)",
   "data_counts": {
@@ -35,5 +35,14 @@
     "campaign": "results/experiments/context_teacher_20261115",
     "smoke": "passed A/B/C 60 steps, matched student B noise, matched B/C teacher lengths",
     "stopped": "user requested per-arm tuning; no full run completed, no test seen"
+  },
+  "tuned_campaign": {
+    "campaign": "results/experiments/context_teacher_tuned_20261115",
+    "stage": "complete",
+    "verdicts_best_ckpt": {
+      "B_vs_C": "reject",
+      "B_vs_C_matched_B": "reject",
+      "B_vs_A": "reject"
+    }
   }
 }

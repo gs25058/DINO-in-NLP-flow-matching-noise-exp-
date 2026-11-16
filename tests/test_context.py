@@ -1,4 +1,6 @@
 import copy
+import os
+import sys
 import json
 from types import SimpleNamespace
 
@@ -452,3 +454,97 @@ def test_context_teacher_tuned_design_gives_every_arm_an_equal_independent_searc
     sel=read_json(c/'selection.json')
     assert sel['C_matched_B_params']==sel['selected_params']['B']
     assert 'Design: tuned' in (c/'report.md').read_text()
+
+
+def test_full_space_anchors_are_valid_and_cover_strong_sharpening():
+    from scripts import run_context_teacher as runner
+    from src.train import load_config
+    for arm in 'BC':
+        base=load_config(runner.p.ROOT/f'configs/context_teacher/{arm}.yaml')
+        plain,sharp=runner.full_anchors(base)
+        cfg=runner.full_configuration(base,plain)
+        # The measured base point is reproduced exactly (only derived noise bounds are recomputed).
+        for section in ('train','loss','context'):
+            for k,v in base[section].items():
+                assert cfg[section][k]==pytest.approx(v),(section,k)
+        for k in ('t_lo','t_start','t_max','warmup_frac'):
+            assert cfg['augment'][k]==pytest.approx(base['augment'][k])
+        assert runner.full_configuration(base,sharp)['loss']['teacher_temp']==.05
+        bad=dict(plain);bad['loss.teacher_temp']=.02
+        with pytest.raises(ValueError):runner.full_configuration(base,bad)
+    assert len(runner.FULL_SPACE)==20
+
+
+def test_context_teacher_full_design_prunes_scores_late_dev_and_selects_without_test(tmp_path,monkeypatch):
+    import optuna
+    from scripts import run_context_teacher as runner
+    from src.provenance import prepare,write_json,read_json
+    from src.train import load_config
+    monkeypatch.setattr(runner,'FULL_TRIALS',10)
+    p=runner.p;c=tmp_path/'campaign'
+    m=prepare(c,p.ROOT,['auto','auto'],tmp_path/'report.md',experiment_dir='context_teacher')
+    m.update(protocol='context_teacher',design='full');write_json(c/'source_manifest.json',m)
+    calls=[]
+    def train(campaign,manifest,children,gpu,cfg,label,seed,smoke=False,trial=None,report='best'):
+        path,resolved=p.save_config(campaign,manifest,cfg,label,seed)
+        calls.append((label,seed,smoke,cfg,trial,report))
+        mode=cfg['context']['teacher_mode']
+        if label.startswith('search_') and label.endswith(('t3','t6')):
+            raise optuna.TrialPruned('fake')
+        temp=cfg['loss']['teacher_temp']
+        # Sharp teachers stay stable; flat ones peak early and collapse (dev best != late dev).
+        late=.72-temp*0.3+seed*1e-6;best=max(late,.73)
+        log=campaign/'results/logs'/resolved['run_name'];log.mkdir(parents=True,exist_ok=True)
+        write_json(log/'context_first_views.json',{'center_noise_sha256':[f'noise{seed}']*3,'center_token_sha256':f'B{seed}',
+            'third_padded_length':10,'teacher_tokens':40,'teacher_padded_length':40})
+        with (log/'evaluations.jsonl').open('w') as f:
+            for step,v in ((250,best),(3500,late),(3750,late),(3999,late)):
+                f.write(json.dumps({'loop_step':step,'sts_b_dev':v})+'\n')
+        return {'run_name':resolved['run_name'],'config':str(path),'seed':seed,'label':label,
+            'metrics':{'best_sts':best,'last_sts':late,'completed_steps':60 if smoke else 4000},
+            'initial_student_sha256':f'full{seed}','initial_shared_sha256':f'shared{seed}','architecture':8192,
+            'first_views':None,'batch_order':{'sha256':f'order{seed}'},'data':{'sentences':{'sha256':'same'}}}
+    evaluated=[]
+    def evaluate(campaign,manifest,groups,children):
+        sel=read_json(campaign/'selection.json')
+        assert sel['test_scores_seen'] is False and sel['primary_test_checkpoint']=='last'
+        assert set(groups)=={'B','C','C_matched_B'}
+        evaluated.append(True)
+    monkeypatch.setattr(p,'execute_train',train);monkeypatch.setattr(p,'evaluate',evaluate)
+    monkeypatch.setattr(p,'set_stage',p.set_stage);monkeypatch.setattr(p,'render',p.render)
+    monkeypatch.setattr(runner.signal,'signal',lambda *args:None)
+    runner.run(c,m)
+    assert read_json(c/'state.json')['stage']=='complete' and evaluated
+    smokes=[x for x in calls if x[2]];assert sorted(x[3]['context']['teacher_mode'] for x in smokes)==['real','unrelated']
+    search=[x for x in calls if x[0].startswith('search_')]
+    assert len(search)==20 and all(x[4] is not None and x[5]=='current' for x in search)
+    s=read_json(c/'search.json')
+    for arm in 'BC':
+        assert s[arm]['3']['pruned'] and s[arm]['6']['pruned'] and 'late_dev' in s[arm]['0']
+        assert s[arm]['1']['params']['loss.teacher_temp']==.05
+        short=read_json(c/'shortlist.json')['trials'][arm]
+        assert '3' not in short and '6' not in short
+        # Ranked by late dev, not by the early-peak best.
+        assert short==sorted(short,key=lambda n:-s[arm][n]['late_dev'])
+    assert sum(x[0].startswith('confirm_') for x in calls)==18 and sum(x[0]=='matched_C_B' for x in calls)==3
+    sel=read_json(c/'selection.json');assert sel['C_matched_B_params']==sel['selected_params']['B']
+    report=(c/'report.md').read_text();assert 'Design: full' in report and 'pruned' in report
+
+
+@pytest.mark.parametrize("report,expected",[("best",[.72,.72,.72]),("current",[.72,.65,.60])])
+def test_children_report_mode_sends_running_best_or_current_dev(tmp_path,monkeypatch,report,expected):
+    from scripts import run_coviso_optuna as rc
+    campaign=tmp_path/'c';(campaign/'source/scripts').mkdir(parents=True);(campaign/'commands').mkdir();(campaign/'status').mkdir()
+    evaluations=tmp_path/'evaluations.jsonl'
+    rows=[{'loop_step':s,'sts_b_dev':v} for s,v in ((2000,.72),(2500,.65),(3000,.60))]
+    script=tmp_path/'fake.py'
+    script.write_text('import json,sys,time\nrows=%r\nwith open(%r,"w") as f:\n    for r in rows:f.write(json.dumps(r)+"\\n")\ntime.sleep(2.5)\n'%(rows,str(evaluations)))
+    # gpu_guard is bypassed: the fake child runs directly.
+    (campaign/'source/scripts/gpu_guard.py').write_text('import subprocess,sys\nsys.exit(subprocess.call(sys.argv[sys.argv.index("--")+1:]))\n')
+    reported=[]
+    class Trial:
+        def report(self,value,step):reported.append(value)
+        def should_prune(self):return False
+    children=rc.Children(campaign,dict(os.environ))
+    children.run('auto','fake',[sys.executable,str(script)],trial=Trial(),evaluation_path=evaluations,report=report)
+    assert reported==pytest.approx(expected)

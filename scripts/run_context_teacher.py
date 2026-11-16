@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import statistics
 import sys
+import math
 import time
 
 import optuna
@@ -21,7 +22,8 @@ import optuna
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts import run_bottleneck as p
-from src.provenance import prepare, read_json, sha256_file, verify_source, write_json
+from src import joint_search
+from src.provenance import prepare, read_json, read_records, sha256_file, verify_source, write_json
 
 ARMS = {"A": "none", "B": "real", "C": "unrelated"}
 SEEDS = (101, 102, 103)
@@ -42,6 +44,48 @@ def configuration(base, params):
 
 def anchor(base):
     return {"backbone_lr": base["train"]["lr"], "head_lr": base["train"]["head_lr"], "beta": base["context"]["beta"]}
+
+
+# design=full: B and C only, every major loss/optimizer/EMA/noise axis plus β.
+# The coviso_relax joint space, except the teacher temperature reaches 0.03.
+FULL_ARMS = ("B", "C")
+FULL_TRIALS = 40
+FULL_SPACE = {**joint_search.SPACE, "loss.teacher_temp": (0.03, 0.18, False), "context.beta": (0.25, 2.0, True)}
+LATE_STEPS = (3500, 3750, 3999)
+
+
+def full_configuration(base, params):
+    """Joint-search parameterization, bounds checked against FULL_SPACE."""
+    if set(params) != set(FULL_SPACE):
+        raise ValueError("full search parameters must match the declared space")
+    cfg = copy.deepcopy(base)
+    for key, value in params.items():
+        lo, hi, _ = FULL_SPACE[key]
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise ValueError(f"parameter outside declared search space: {key}")
+        if not key.startswith("_"):
+            section, name = key.split(".")
+            cfg[section][name] = float(value)
+    aug = cfg["augment"]
+    aug["t_max"] = min(0.99, aug["t_lo"] + params["_t_span"])
+    aug["t_start"] = aug["t_lo"] + (aug["t_max"] - aug["t_lo"]) * params["_t_start_frac"]
+    cfg["loss"]["view_weights"] = [1., 1., cfg["context"]["beta"]]
+    return cfg
+
+
+def full_anchors(base):
+    """Measured base point, and the same point with strong DINO-style sharpening."""
+    point = joint_search.baseline_parameters(base)
+    point["context.beta"] = float(base["context"]["beta"])
+    return [point, {**point, "loss.teacher_temp": 0.05}]
+
+
+def late_dev(campaign, record):
+    """Collapse-aware objective: mean dev Spearman of the last three evaluations."""
+    rows = {r["loop_step"]: r["sts_b_dev"] for r in read_records(campaign / "results/logs" / record["run_name"] / "evaluations.jsonl")}
+    if not all(step in rows for step in LATE_STEPS):
+        raise RuntimeError(f"missing late evaluations for {record['run_name']}")
+    return statistics.mean(rows[step] for step in LATE_STEPS)
 
 
 def audit(campaign, records, calibration):
@@ -69,12 +113,36 @@ def render(campaign):
              "A: teacher solo B. B: real window. C: other-document context, exact per-side token lengths.",
              ""]
     manifest = read_json(campaign / "source_manifest.json")
-    if manifest.get("design", "fixed") == "tuned":
+    design = manifest.get("design", "fixed")
+    search = read_json(campaign / "search.json") if (campaign / "search.json").exists() else {}
+    if design == "full":
+        lines += [f"Design: full. B and C only; independent lockstep TPE over {len(FULL_SPACE)} axes "
+                  f"({FULL_TRIALS} attempted trials each, seed 42, median pruning on current dev from step 2000). "
+                  "Objective and selection: late dev = mean of steps 3500/3750/3999. Primary test checkpoint: last.", "",
+                  "| trial | B late dev | B best | C late dev | C best |", "|---|---|---|---|---|"]
+        for n in range(FULL_TRIALS):
+            cells = []
+            for arm in FULL_ARMS:
+                r = search.get(arm, {}).get(str(n))
+                cells += (["pruned", ""] if r and r["pruned"] else
+                          [f"{r['late_dev']*100:.2f}", f"{r['metrics']['best_sts']*100:.2f}"] if r else ["", ""])
+            if any(cells):
+                lines.append(f"| {n} | " + " | ".join(cells) + " |")
+        for arm, rows in search.items():
+            done = {n: r for n, r in rows.items() if not r["pruned"]}
+            if done:
+                n, r = max(done.items(), key=lambda kv: kv[1]["late_dev"])
+                temps = r["params"]["loss.teacher_temp"], r["params"]["loss.student_temp"]
+                lines.append(f"\n{arm} search best: trial {n}, late dev {r['late_dev']*100:.2f} "
+                             f"(teacher/student temp {temps[0]:.3f}/{temps[1]:.3f}); "
+                             f"{len(rows) - len(done)} of {len(rows)} pruned.")
+        lines.append("")
+        search = {}
+    elif design == "tuned":
         lines += [f"Design: tuned. Independent equal-budget Optuna per arm ({TRIALS} trials, seed 42, lockstep), "
                   "top-3 confirmed on seeds 101..103, selection by fresh-seed dev mean; C also run at B's parameters.", ""]
     else:
         lines += ["Design: fixed. context_distill combination 1 for every arm; no selection.", ""]
-    search = read_json(campaign / "search.json") if (campaign / "search.json").exists() else {}
     if search:
         lines += ["| trial | A dev best | B dev best | C dev best |", "|---|---|---|---|"]
         for n in range(TRIALS):
@@ -112,13 +180,14 @@ def render(campaign):
             shown = " / ".join(f"{x*100:.2f}" if x is not None else "—" for x in vals)
             mean = f"{statistics.mean(x*100 for x in vals):.2f}" if None not in vals else ""
             lines.append(f"| {arm} | {which} | {shown} | {mean} |")
+        which = "last" if design == "full" else "best"
         for control in ("C", "C_matched_B", "A"):
-            b, o = scores.get(("B", "best"), {}), scores.get((control, "best"), {})
+            b, o = scores.get(("B", which), {}), scores.get((control, which), {})
             if len(b) == len(o) == 3:
                 d = [b[str(s)] - o[str(s)] for s in SEEDS]
                 verdict = ("성립" if statistics.mean(d) >= .003 and sum(x > 0 for x in d) >= 2 else
                            "기각" if statistics.mean(d) <= 0 and sum(x <= 0 for x in d) >= 2 else "판정불가")
-                lines.append(f"\nB vs {control} (STS7, best): {verdict}, paired Δ={statistics.mean(d)*100:+.2f} pp, "
+                lines.append(f"\nB vs {control} (STS7, {which}): {verdict}, paired Δ={statistics.mean(d)*100:+.2f} pp, "
                              f"per seed {', '.join(f'{x*100:+.2f}' for x in d)}.")
     lines += ["", "Missing results are unexecuted, not estimated. No statistical significance is claimed."]
     if state.get("error"):
@@ -159,12 +228,15 @@ def run(campaign, manifest):
     try:
         stage(campaign, "smoke")
         smokes = {}
-        p.parallel_jobs(list(ARMS), manifest["gpus"], children,
+        design = manifest.get("design", "fixed")
+        p.parallel_jobs(list(FULL_ARMS if design == "full" else ARMS), manifest["gpus"], children,
                         lambda gpu, arm: train(gpu, arm, f"smoke_{arm}", 42, smoke=True),
                         lambda arm, r: smokes.update({arm: r}))
         audit(campaign, list(smokes.values()), calibration)
         write_json(campaign / "smoke.json", smokes)
-        if manifest.get("design", "fixed") == "tuned":
+        if design == "full":
+            groups = full(campaign, manifest, children, records, calibration, configs)
+        elif design == "tuned":
             groups = tuned(campaign, manifest, children, train, records, calibration, configs)
         else:
             groups = fixed(campaign, manifest, children, train, records, calibration)
@@ -266,11 +338,97 @@ def tuned(campaign, manifest, children, train, records, calibration, configs):
     return groups
 
 
+def full(campaign, manifest, children, records, calibration, configs):
+    """B and C: lockstep independent TPE over FULL_SPACE, late-dev objective, current-value pruning."""
+    storage = f"sqlite:///{campaign / 'studies.db'}"
+    studies, search = {}, {arm: {} for arm in FULL_ARMS}
+    for arm in FULL_ARMS:
+        studies[arm] = optuna.create_study(
+            study_name=f"{campaign.name}_{arm}", storage=storage, direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=SAMPLER_SEED, n_startup_trials=8, multivariate=True),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=2000, interval_steps=500,
+                                               n_min_trials=4))
+        for point in full_anchors(configs[arm]):
+            studies[arm].enqueue_trial(point)
+
+    def train(gpu, arm, label, seed, params, trial=None):
+        return p.execute_train(campaign, manifest, children, gpu, full_configuration(configs[arm], params),
+                               label, seed, trial=trial, report="current")
+
+    for n in range(FULL_TRIALS):
+        stage(campaign, "search", trial=n, completed_trials=n)
+        trials = {arm: studies[arm].ask() for arm in FULL_ARMS}
+        params = {arm: {k: trials[arm].suggest_float(k, lo, hi, log=log) for k, (lo, hi, log) in FULL_SPACE.items()}
+                  for arm in FULL_ARMS}
+        outcome = {}
+
+        def attempt(gpu, arm):
+            try:
+                return train(gpu, arm, f"search_{arm}_t{n}", 42, params[arm], trials[arm])
+            except optuna.TrialPruned:
+                return None
+
+        p.parallel_jobs(list(FULL_ARMS), manifest["gpus"], children, attempt,
+                        lambda arm, r: outcome.update({arm: r}))
+        for arm in FULL_ARMS:
+            r = outcome[arm]
+            if r is None:
+                studies[arm].tell(trials[arm], state=optuna.trial.TrialState.PRUNED)
+                search[arm][str(n)] = {"params": params[arm], "pruned": True}
+                continue
+            value = late_dev(campaign, r)
+            records.append(r)
+            studies[arm].tell(trials[arm], value)
+            search[arm][str(n)] = {**r, "params": params[arm], "pruned": False, "late_dev": value}
+        write_json(campaign / "search.json", search)
+        audit(campaign, records, calibration)
+        render(campaign)
+    complete = {arm: [n for n, r in search[arm].items() if not r["pruned"]] for arm in FULL_ARMS}
+    shortlist = {arm: sorted(complete[arm], key=lambda n: (-search[arm][n]["late_dev"], int(n)))[:3] for arm in FULL_ARMS}
+    write_json(campaign / "shortlist.json", {"trials": shortlist, "seeds": SEEDS, "test_seen": False,
+                                              "metric": "late dev (steps 3500/3750/3999 mean)"})
+    confirmed = {arm: {n: {} for n in shortlist[arm]} for arm in FULL_ARMS}
+    stage(campaign, "confirmation")
+
+    def saved(job, r):
+        arm, n, seed = job
+        confirmed[arm][n][str(seed)] = {**r, "late_dev": late_dev(campaign, r)}
+        records.append(r)
+        write_json(campaign / "confirmations.json", confirmed)
+        audit(campaign, records, calibration)
+        render(campaign)
+
+    jobs = [(arm, n, seed) for seed in SEEDS for arm in FULL_ARMS for n in shortlist[arm]]
+    p.parallel_jobs(jobs, manifest["gpus"], children,
+                    lambda gpu, job: train(gpu, job[0], f"confirm_{job[0]}_t{job[1]}", job[2],
+                                           search[job[0]][job[1]]["params"]), saved)
+    selected = {arm: min(shortlist[arm], key=lambda n: (-statistics.mean(
+        r["late_dev"] for r in confirmed[arm][n].values()), int(n))) for arm in FULL_ARMS}
+    groups = {arm: confirmed[arm][n] for arm, n in selected.items()}
+    bparams = search["B"][selected["B"]]["params"]
+    stage(campaign, "matched_unrelated_control")
+    groups["C_matched_B"] = {}
+
+    def matched(seed, r):
+        groups["C_matched_B"][str(seed)] = {**r, "late_dev": late_dev(campaign, r)}
+        records.append(r)
+
+    p.parallel_jobs(list(SEEDS), manifest["gpus"], children,
+                    lambda gpu, seed: train(gpu, "C", "matched_C_B", seed, bparams), matched)
+    audit(campaign, records, calibration)
+    write_json(campaign / "selection.json", {
+        "selected_trials": selected, "selected_params": {arm: search[arm][n]["params"] for arm, n in selected.items()},
+        "C_matched_B_params": bparams, "selection_metric": "fresh three-seed late dev mean (steps 3500/3750/3999)",
+        "primary_test_checkpoint": "last", "selection_frozen_unix": time.time(), "test_scores_seen": False})
+    write_json(campaign / "final_runs.json", groups)
+    return groups
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--design", choices=("fixed", "tuned"), default="fixed")
+    parser.add_argument("--design", choices=("fixed", "tuned", "full"), default="fixed")
     args = parser.parse_args()
     c = args.campaign.resolve()
     if args.execute:

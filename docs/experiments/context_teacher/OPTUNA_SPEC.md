@@ -59,3 +59,24 @@ context_teacher_20261115는 첫 full run 도중(완료 run 없음, test 미관�
 - 판정(STS7 test, dev-best checkpoint, seed paired): 주비교는 각자 튜닝된 B vs C(사용자가 요청한 공정 비교),
   보조로 B vs C_matched_B(같은 hyperparameter), B vs A를 같은 규칙(평균≥.003·2/3 양수 성립)으로 보고.
 - 예산: smoke3 + search36 + confirm27 + matched3 = 69 run, 그 뒤 best/last STS7 24 eval. 최대2GPU.
+
+## 결과 요약: design=tuned (context_teacher_tuned_20261115, 완료)
+
+STS7 test(dev-best ckpt) 평균: A 63.77, B 61.56, C 62.68, C_matched_B 62.35. B vs C·C_matched_B·A 모두 기각.
+진단: B/C의 teacher 분포가 균등분포로 붕괴(C 후반 H_pt 9.0107≈ln8192, batch_KL 1e-4).
+66 run에서 log(후반 batch_KL)과 dev(last−best) 상관 0.83. dev-best는 붕괴 직전 step250 근처를 선택했다.
+고정했던 teacher temp .135/student .151(sharpening 비 약1.1)이 붕괴를 허용했을 가능성이 크다.
+
+## 개정 2 (2026-11-16, 사용자 요청): B·C 전체 축 튜닝 (design=full)
+
+A는 재실행하지 않는다(tuned 결과를 참고 기준으로만 보고; A는3축만 튜닝되어 B/C에 유리한 비교임을 공개).
+- 공간: coviso_relax의 19축 공동 공간(`src/joint_search.py::SPACE`) + β[.25,2] log, 단 teacher temp
+  하한을 .03으로 넓힌다([.03,.18] linear). 총20축. `scripts/run_context_teacher.py::FULL_SPACE`가 실행 명세.
+- arm별 독립 TPE(seed20261115, startup8, multivariate), lockstep, arm당40 attempted trial(pruned 포함).
+  anchor 2개: 측정된 base 점, 같은 점에 teacher temp=.05(강한 sharpening).
+- 목적함수(사전 등록 변경): late dev = step3500/3750/3999 dev Spearman 평균. dev-best는 붕괴 직전 초반
+  봉우리를 고르므로 쓰지 않는다. MedianPruner(startup8, warmup2000, 간격500, 최소4)는 현재 dev 값을 비교한다.
+- 확인: arm별 완주 trial top3(late dev) × seed101..103, 새 3seed late dev 평균으로 동결. C_matched_B 3run.
+- 판정: STS7 test, **last checkpoint**가 주판정(best도 보고). B vs C(각자 튜닝) 주비교, B vs C_matched_B 보조,
+  규칙은 동일(평균≥.003·2/3 양수 성립 / 평균≤0·2/3 비양수 기각 / 그 외 판정불가).
+- 예산: smoke2 + search≤80 + confirm18 + matched3, 그 뒤 STS7 18 eval. 최대2GPU.

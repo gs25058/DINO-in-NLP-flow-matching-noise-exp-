@@ -143,7 +143,9 @@ class Children:
         trial=None,
         evaluation_path=None,
         expected_initialization=None,
+        report="best",
     ):
+        """``report='current'`` gives the pruner each evaluation as-is, so late collapse is visible."""
         if self.stopping.is_set():
             raise RuntimeError("controller was stopped")
         campaign = self.campaign
@@ -202,7 +204,7 @@ class Children:
                                 continue
                             seen.add(step)
                             best = max(best, row["sts_b_dev"])
-                            trial.report(best, step)
+                            trial.report(best if report == "best" else row["sts_b_dev"], step)
                             # Never prune at the final evaluation: it is a full trial.
                             if step < 3999 and trial.should_prune():
                                 pruned = True

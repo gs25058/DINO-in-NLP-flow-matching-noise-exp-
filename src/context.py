@@ -84,7 +84,8 @@ class ContextViews:
         if self.teacher_mode not in ('none','real','unrelated'):raise ValueError('invalid teacher context mode')
         if self.teacher_mode!='none' and cfg['mode']!='none':raise ValueError('context goes to the teacher or the student, not both')
         self.side_budget=cfg.get('side_budget',48);self.total_budget=cfg.get('total_budget',226)
-        if not 0<=cfg['weak_t_max']<augment.t_lo:raise ValueError('context noise must be weaker than B')
+        # Only a student context view is noised with weak_t_max; it is unused otherwise.
+        if cfg['mode']!='none' and not 0<=cfg['weak_t_max']<augment.t_lo:raise ValueError('context noise must be weaker than B')
 
     def forward(self,student,teacher,rows,step,mode=None,blocked=False,noise_bounds=None):
         solo=pack(rows,self.tokenizer,'none',self.device)
