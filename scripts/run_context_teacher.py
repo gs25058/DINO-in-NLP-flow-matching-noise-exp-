@@ -9,6 +9,7 @@ Arms differ only in ``context.teacher_mode``. Two designs, both starting with
 """
 import argparse
 import copy
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -18,6 +19,7 @@ import math
 import time
 
 import optuna
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -90,13 +92,17 @@ def late_dev(campaign, record):
 
 def audit(campaign, records, calibration):
     p.audit_runs(campaign, records, calibration)
-    student, teacher = {}, {}
+    student, noise, teacher = {}, {}, {}
     for r in records:
         info = read_json(campaign / "results/logs" / r["run_name"] / "context_first_views.json")
         key = (r["seed"], r["label"].startswith("smoke"))
-        common = {k: info[k] for k in ("center_noise_sha256", "center_token_sha256", "third_padded_length")}
+        common = {k: info[k] for k in ("center_token_sha256", "third_padded_length")}
         if student.setdefault(key, common) != common:
-            raise RuntimeError("student B tokens/noise differ across arms")
+            raise RuntimeError("student B tokens differ across runs of one seed")
+        # Noise is only comparable under the same noise settings (design=full tunes them).
+        augment = hashlib.sha256(yaml.safe_dump(p.load_config(r["config"])["augment"], sort_keys=True).encode()).hexdigest()
+        if noise.setdefault((*key, augment), info["center_noise_sha256"]) != info["center_noise_sha256"]:
+            raise RuntimeError("student B noise differs under the same seed and noise settings")
         if r["label"].split("_")[1] in ("B", "C"):
             layout = {k: info[k] for k in ("teacher_tokens", "teacher_padded_length")}
             if teacher.setdefault(key, layout) != layout:

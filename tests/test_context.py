@@ -495,7 +495,9 @@ def test_context_teacher_full_design_prunes_scores_late_dev_and_selects_without_
         # Sharp teachers stay stable; flat ones peak early and collapse (dev best != late dev).
         late=.72-temp*0.3+seed*1e-6;best=max(late,.73)
         log=campaign/'results/logs'/resolved['run_name'];log.mkdir(parents=True,exist_ok=True)
-        write_json(log/'context_first_views.json',{'center_noise_sha256':[f'noise{seed}']*3,'center_token_sha256':f'B{seed}',
+        # Like the real run: noise depends on seed AND the (tuned) noise settings.
+        aug=json.dumps(cfg['augment'],sort_keys=True)
+        write_json(log/'context_first_views.json',{'center_noise_sha256':[f'noise{seed}{aug}']*3,'center_token_sha256':f'B{seed}',
             'third_padded_length':10,'teacher_tokens':40,'teacher_padded_length':40})
         with (log/'evaluations.jsonl').open('w') as f:
             for step,v in ((250,best),(3500,late),(3750,late),(3999,late)):
@@ -548,3 +550,21 @@ def test_children_report_mode_sends_running_best_or_current_dev(tmp_path,monkeyp
     children=rc.Children(campaign,dict(os.environ))
     children.run('auto','fake',[sys.executable,str(script)],trial=Trial(),evaluation_path=evaluations,report=report)
     assert reported==pytest.approx(expected)
+
+
+def test_context_teacher_audit_compares_noise_only_under_equal_noise_settings(tmp_path,monkeypatch):
+    from scripts import run_context_teacher as runner
+    from src.provenance import write_json
+    import yaml
+    monkeypatch.setattr(runner.p,'audit_runs',lambda *a:None)
+    def record(name,label,aug,noise_hash):
+        cfg=tmp_path/f'{name}.yaml';cfg.write_text(yaml.safe_dump({'augment':aug}))
+        log=tmp_path/'results/logs'/name;log.mkdir(parents=True)
+        write_json(log/'context_first_views.json',{'center_noise_sha256':[noise_hash],'center_token_sha256':'B',
+            'third_padded_length':10,'teacher_tokens':40,'teacher_padded_length':40})
+        return {'run_name':name,'label':label,'seed':42,'config':str(cfg)}
+    ok=[record('b0','search_B_t0',{'t_lo':.4},'n1'),record('c0','search_C_t0',{'t_lo':.4},'n1'),
+        record('b2','search_B_t2',{'t_lo':.1},'n2')]
+    runner.audit(tmp_path,ok,{})
+    bad=ok+[record('c2','search_C_t2',{'t_lo':.1},'n3')]
+    with pytest.raises(RuntimeError,match='noise'):runner.audit(tmp_path,bad,{})

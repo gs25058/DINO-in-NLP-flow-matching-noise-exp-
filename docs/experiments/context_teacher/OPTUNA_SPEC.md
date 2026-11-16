@@ -80,3 +80,10 @@ A는 재실행하지 않는다(tuned 결과를 참고 기준으로만 보고; A�
 - 판정: STS7 test, **last checkpoint**가 주판정(best도 보고). B vs C(각자 튜닝) 주비교, B vs C_matched_B 보조,
   규칙은 동일(평균≥.003·2/3 양수 성립 / 평균≤0·2/3 비양수 기각 / 그 외 판정불가).
 - 예산: smoke2 + search≤80 + confirm18 + matched3, 그 뒤 STS7 18 eval. 최대2GPU.
+
+### 재시작 기록 (2026-11-16)
+
+context_teacher_full_20261116은 trial 0..2 완료 뒤 감사 버그로 멈췄다: 같은 seed의 student noise를
+trial 간에도 같다고 요구했으나 full 설계는 노이즈 설정을 튜닝한다. 같은 trial의 B/C noise는 일치했다.
+감사를 (seed, 노이즈 설정 hash) 단위로 고친 뒤 같은 설계·예산으로 context_teacher_full_20261116b를 새로 시작한다.
+이전 3 trial은 보존하되 새 study에 넣지 않는다(test 미관찰).
