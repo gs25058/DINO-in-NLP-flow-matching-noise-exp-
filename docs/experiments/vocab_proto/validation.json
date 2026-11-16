@@ -1,0 +1,32 @@
+{
+  "before_tests": 123,
+  "after_tests": 133,
+  "runner_test": "tests/test_vocab_runner.py: fake training through search (pruned/failed trials kept in the 40-attempt budget), top-3 confirmation on seeds 43/44, selection frozen before test, P1-P5 rendering",
+  "new_tests": "tests/test_vocab_proto.py (9): legacy head bit-for-bit with no keys, MLM logits reproduced, untied decoder and head-only updates leave input embeddings unchanged, frozen head has no optimizer group and a bitwise-constant teacher copy, head construction leaves the global RNG untouched, invalid options rejected, search space bounds/anchors/teacher-not-softer, copy rate / pair KL / postprocess exact on toys",
+  "bit_identical_default_path": {
+    "check": "configs/vocab_proto/base.yaml (= t13 + order/first-view records), seed 42, 60 steps, legacy be730f7 vs this branch, both on GPU via gpu_guard",
+    "components_jsonl": "7 rows, 122 values, identical, max abs diff 0",
+    "evaluations_jsonl": "2 rows, 32 values, identical, max abs diff 0",
+    "initial_student_sha256": "identical",
+    "initial_shared_sha256": "identical",
+    "first_views": "identical",
+    "batch_order": "identical",
+    "provenance_keys_added": ["initial_backbone_sha256"]
+  },
+  "cpu_trainer_check": "C1 anchor config, 2 steps on CPU: all diagnostics logged; step-0 head dev 0.593751, embedding dev 0.593121; decoder_shares_input_storage 0",
+  "phase0_preview": {
+    "C1": {"head_raw": 0.593751, "embedding_raw": 0.593121, "H_temp1": 6.0806, "KL_pairs_temp1": 7.5171, "H_over_lnK_temp1": 0.5889},
+    "C3": {"head_raw": 0.5126, "H_temp1": 8.8973, "KL_pairs_temp1": 0.2267, "H_over_lnK_temp1": 0.9874},
+    "passed": true
+  },
+  "kmeans_cache": {
+    "path": "data/vocab_kmeans_bert_base_uncased_k8192_seed0.pt",
+    "sha256": "99a4ad4a02f18067a3f5818a080208887302bf4e5482f28db7704f9bc4c61e33",
+    "iterations": 39,
+    "empty_clusters": 0,
+    "singleton_clusters": 4708,
+    "largest_cluster": 995,
+    "word_embedding_sha256": "ca6b51539e1d8c14f11e946a2e6f87a2f547aa0f8d17c15f1c92299d51cd8105"
+  },
+  "early_observation_not_a_result": "C1 anchor step 0 (warmup teacher temp 0.233): H_pt/lnK 0.034, teacher copy rate 0.625, backbone DINO grad norm 26 (t13 step 0: 0.35)"
+}

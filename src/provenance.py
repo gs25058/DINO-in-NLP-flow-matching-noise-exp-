@@ -70,6 +70,7 @@ def record_run(root, cfg, student, device, argv):
         "device": str(device),
         "initial_student_sha256": model_fingerprint(student),
         "initial_shared_sha256": model_fingerprint(student, ("head.expand.",)),
+        "initial_backbone_sha256": model_fingerprint(student, ("head.",)),
         "data": data,
         "python": platform.python_version(),
         "libraries": {

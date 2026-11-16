@@ -1,4 +1,10 @@
-# 현재 요청: 문맥을 읽는 teacher (local→global)
+# 현재 요청: 어휘 prototype DINO (mean pooling 고정)
+
+[vocab_proto 명세](docs/experiments/vocab_proto/OPTUNA_SPEC.md)를 따른다. C0=t13 재사용, C1 사전학습 MLM head(학습),
+C2 동결, C3 단어 임베딩 k-means 8192. 조건 차이는 `model.head.head_type/head_freeze`와 조건별 독립 Optuna(40 trial)다.
+키가 없으면 기존 head와 bit-identical이다. [MASK] pooling·BoW anchor·토큰 soft MLM은 범위 밖이다.
+
+# 직전 요청: 문맥을 읽는 teacher (local→global)
 
 [context_teacher 명세](docs/experiments/context_teacher/OPTUNA_SPEC.md)를 따른다.
 teacher가 5..7문장 창 안의 clean B를 읽고 B 토큰만 pooling, student는 모든 arm에서 solo noisy B다.

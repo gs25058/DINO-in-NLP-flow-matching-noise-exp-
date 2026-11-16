@@ -183,6 +183,45 @@ def sts_suite_by_space(
     return result
 
 
+POSTPROCESS = ("center", "center_pc1", "center_pc2")
+
+
+def fit_postprocess(model, tokenizer, sentences, device, batch_size=64, max_length=128):
+    """Mean and top-2 principal directions of embeddings of fixed *training-corpus* sentences.
+
+    Never uses evaluation data. Applied as z ↦ normalize(P(z − μ)), P removing the top PCs.
+    """
+    z = encode_sentences(model, tokenizer, sentences, device, batch_size, max_length)["embedding"].double()
+    mean = z.mean(dim=0)
+    _, _, vh = torch.linalg.svd(z - mean, full_matrices=False)
+    return {"mean": mean, "components": vh[:2]}
+
+
+def apply_postprocess(z, fit, variant):
+    x = z.double() - fit["mean"]
+    pcs = {"center": 0, "center_pc1": 1, "center_pc2": 2}[variant]
+    if pcs:
+        u = fit["components"][:pcs]
+        x = x - (x @ u.t()) @ u
+    return F.normalize(x, p=2, dim=-1).float()
+
+
+def sts_suite_postprocessed(model, tokenizer, device, fit, batch_size=64, max_length=128):
+    """STS7 test of the 768d embedding under each post-hoc variant (raw is computed separately)."""
+    result = {variant: {} for variant in POSTPROCESS}
+    for task, dataset in STS_SUITE.items():
+        ds = load_dataset(dataset, split="test")
+        e1 = encode_sentences(model, tokenizer, list(ds["sentence1"]), device, batch_size, max_length)["embedding"]
+        e2 = encode_sentences(model, tokenizer, list(ds["sentence2"]), device, batch_size, max_length)["embedding"]
+        for variant in POSTPROCESS:
+            a, b = apply_postprocess(e1, fit, variant), apply_postprocess(e2, fit, variant)
+            cosines = F.cosine_similarity(a, b, dim=-1).numpy()
+            result[variant][task] = float(spearmanr(cosines, list(ds["score"]))[0])
+    for scores in result.values():
+        scores["avg_7task"] = sum(scores.values()) / len(scores)
+    return result
+
+
 def sts_suite_spearman(model, tokenizer, device, batch_size=64, max_length=128):
     return sts_suite_by_space(
         model, tokenizer, device, batch_size, max_length, spaces=("embedding",)

@@ -1,0 +1,32 @@
+{
+  "C0": "coviso joint trial 13 (t13), reused without retraining",
+  "campaign": "results/experiments/coviso_joint_optuna_20261028",
+  "config": "configs/coviso_relax/selected_joint.yaml",
+  "run_name_pattern": "r18_bert_joint_optuna_coviso_joint_optuna_20261028_t13_s{seed}",
+  "seeds": [42, 43, 44],
+  "recorded_dev_best": {"42": 0.737162, "43": 0.735175, "44": 0.744721},
+  "recorded_sts7_raw": {
+    "best": {"42": 0.67397, "43": 0.66948, "44": 0.66946, "mean": 0.67097},
+    "last": {"42": 0.67437, "43": 0.66772, "44": 0.66915, "mean": 0.67041}
+  },
+  "recorded_eval": "scripts/eval_sts7.py --pooling last --entity student --tf32 (mean pooling of the last layer + L2)",
+  "checkpoint_sha256": {
+    "s42/best.pt": "2b5860efe5e4922542104dd95089717d035dbac39233b382d877c511b7ba42b2",
+    "s43/best.pt": "30f3f56bafd1150735b85f1726309441409322836428961882a9ac2da34e361b",
+    "s44/best.pt": "9c8a5a1987759b11d27420ee509d667b022c9f19a09bef36d90300d58afc76f0",
+    "s42/last.pt": "8f5c36744e3de26c6c96d1e5934e069f45cebdd3a572b6b44f408c071492e04d",
+    "s43/last.pt": "abeb93bdd324692a197a36a93f8e26d179aae98f38641205a4e53b1ccdbcc4b5",
+    "s44/last.pt": "50e34b72219c4a69af963a4341775548ceac53b4f630e8071ca3e2c2ec3266e5"
+  },
+  "config_sha256": {
+    "t13_s42.yaml": "be79b287d98d168b1a7f2fa3d75ab220864205b822d3f8e34f39324b2a1a397c",
+    "t13_s43.yaml": "2541d03635fc7eafeceae8fffb27d876f42bdf26f569f7afea1f78b907ba9194",
+    "t13_s44.yaml": "af70e147ac412ba618586b2f38d35fc32fe868cbb7049d5e8d1ddf1fea53f9a2"
+  },
+  "input_embedding_drift_vs_pretrained": {
+    "note": "C0 also trains the input word embeddings through the backbone optimizer; relative Frobenius change",
+    "s42": {"best": 0.041521, "last": 0.041585},
+    "s43": {"best": 0.041747, "last": 0.041811},
+    "s44": {"best": 0.041799, "last": 0.041865}
+  }
+}

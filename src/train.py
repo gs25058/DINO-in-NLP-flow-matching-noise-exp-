@@ -89,7 +89,9 @@ def build_param_groups(student, lr, head_lr, weight_decay):
             parameters = [
                 p
                 for name, p in named
-                if ("bias" not in name.lower() and "norm" not in name.lower()) == decay
+                # A frozen head (requires_grad False) takes no optimizer group.
+                if p.requires_grad
+                and ("bias" not in name.lower() and "norm" not in name.lower()) == decay
             ]
             if parameters:
                 groups.append(
@@ -100,6 +102,17 @@ def build_param_groups(student, lr, head_lr, weight_decay):
                     }
                 )
     return groups
+
+
+def head_options(head, root, seed):
+    """No keys → no options, so the legacy random-prototype head is constructed unchanged."""
+    if head.get("head_type") in (None, "random"):
+        return {"head_type": head["head_type"]} if "head_type" in head else {}
+    options = {"head_type": head["head_type"], "head_freeze": bool(head.get("head_freeze", False)),
+               "head_init_seed": seed}
+    if head.get("kmeans_path"):
+        options["kmeans_path"] = str(root / head["kmeans_path"])
+    return options
 
 
 def cosine_ramp(step, start, end, duration):
@@ -129,6 +142,7 @@ class TrainingStep:
     losses: LossTerms
     student_logits: list[torch.Tensor]
     teacher_temp: float
+    vocab: dict | None = None
 
 
 @dataclass
@@ -169,9 +183,14 @@ class Trainer:
             model["head"]["bottleneck_dim"],
             model["head"]["logit_dim"],
             **({"pooling_policy": model["pooling_policy"]} if "pooling_policy" in model else {}),
+            **head_options(model["head"], root, cfg["seed"]),
         ).to(device)
         self.teacher = EMATeacher(self.student, train["momentum_start"])
         record_run(root, cfg, self.student, device, sys.argv)
+        self.vocab_diag = None
+        if model["head"].get("head_type") not in (None, "random"):
+            from src.vocab_proto import VocabDiagnostics
+            self.vocab_diag = VocabDiagnostics(self, root)
         stats = torch.load(root / data["embed_stats_path"], map_location="cpu", weights_only=True)
         self.augment = FlowNoiseAug(
             stats["mean"],
@@ -241,6 +260,8 @@ class Trainer:
         special = enc["special_tokens_mask"].bool().to(self.device) | ~mask.bool()
         token_embeds = self.student.get_input_embeddings()(ids)
         views = self.augment(token_embeds, special, step)
+        if getattr(self, "vocab_diag", None) is not None:
+            self.vocab_diag.batch = (ids, special, views.t)
         teacher_embeds = views.teacher_embeds
         if getattr(self, "teacher_input", "student") == "ema":
             with torch.no_grad():
@@ -268,6 +289,9 @@ class Trainer:
 
     def training_step(self, sentences, step) -> TrainingStep:
         views = self.forward_views(sentences, step)
+        diag = getattr(self, "vocab_diag", None)
+        # Targets use the previous center; keep it for the copy-rate diagnostic.
+        previous_center = self.objective.dino.center.clone() if diag is not None else None
         loss_cfg = self.cfg["loss"]
         temperature = cosine_ramp(
             step,
@@ -284,7 +308,11 @@ class Trainer:
             teacher_bottleneck=views.teacher.bottleneck,
             student_bottlenecks=views.student_bottlenecks,
         )
-        return TrainingStep(losses, views.student_logits, temperature)
+        vocab = None
+        if diag is not None:
+            vocab = {"teacher_logits": views.teacher.logits.detach(), "center": previous_center,
+                     "batch": diag.batch}
+        return TrainingStep(losses, views.student_logits, temperature, vocab)
 
     def optimize(self, result, step):
         losses, diagnostics = result.losses, {}
@@ -360,6 +388,8 @@ class Trainer:
             "teacher_temp": result.teacher_temp,
             "teacher_momentum": self.teacher.momentum,
         }
+        if getattr(self, "vocab_diag", None) is not None:
+            log.update(self.vocab_diag.step_scalars(result))
         append_record(
             self.run_dir / "components.jsonl",
             {"loop_step": step, "optimizer_steps": step + 1, **log},
@@ -404,6 +434,8 @@ class Trainer:
                     f"uniformity_{space}": row.uniformity,
                 }
             )
+        if getattr(self, "vocab_diag", None) is not None:
+            log.update(self.vocab_diag.eval_scalars(step))
         for key, value in log.items():
             self.writer.add_scalar(f"eval/{key}", value, step)
         self.logger.info(f"[step {step}] EVAL " + " ".join(f"{k}={v:.6g}" for k, v in log.items()))

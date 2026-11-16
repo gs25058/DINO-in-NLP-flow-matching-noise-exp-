@@ -7,6 +7,8 @@ import torch
 class NoiseViews:
     teacher_embeds: torch.Tensor
     student_embeds: list[torch.Tensor]
+    # Per-view, per-sentence interpolation times (diagnostics; no extra RNG draws).
+    t: list[torch.Tensor] | None = None
 
 
 class FlowNoiseAug:
@@ -33,7 +35,7 @@ class FlowNoiseAug:
         mu = self.mu.to(device=device, dtype=dtype)
         sigma = self.sigma.to(device=device, dtype=dtype)
         standardized = (token_embeds - mu) / sigma
-        students = []
+        students, times = [], []
         for view_index in range(self.num_student_views):
             lo, hi = self.t_lo, self.t_hi(step)
             if view_index == 0 and self.weak_view is not None:
@@ -42,7 +44,8 @@ class FlowNoiseAug:
                 batch, device=device, dtype=dtype
             )
             eps = torch.randn(batch, length, dim, device=device, dtype=dtype)
+            times.append(t)
             t = t.view(batch, 1, 1)
             noised = ((1 - t) * standardized + t * eps) * sigma + mu
             students.append(torch.where(special_mask.unsqueeze(-1), token_embeds, noised))
-        return NoiseViews(token_embeds, students)
+        return NoiseViews(token_embeds, students, times)

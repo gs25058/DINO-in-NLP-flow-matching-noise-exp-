@@ -1,0 +1,9 @@
+# C0 = coviso joint trial 13 (t13) exactly; conditions C1–C3 change model.head and
+# are then tuned by src/vocab_proto.py. Order/first-view hashes consume no RNG.
+extends: ../coviso_relax/selected_joint.yaml
+run_name: vocab_proto_base_s42
+train:
+  record_batch_order: true
+  record_first_views: true
+experiment:
+  protocol: vocab_proto
