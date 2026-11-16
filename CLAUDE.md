@@ -3,7 +3,7 @@
 [context_teacher 명세](docs/experiments/context_teacher/OPTUNA_SPEC.md)를 따른다.
 teacher가 5..7문장 창 안의 clean B를 읽고 B 토큰만 pooling, student는 모든 arm에서 solo noisy B다.
 조건 차이는 `context.teacher_mode`(none/real/unrelated) 하나다. 3축 tuned 설계는 완료(모두 기각, teacher 균등 붕괴).
-현재는 명세 개정2: B·C만 20축 독립 Optuna(40trial, late-dev 목적, 현재값 pruning), last ckpt 주판정(`--design full`).
+명세 개정2(B·C 20축 `--design full`)는 search 15/40에서 사용자 결정으로 중단했다(가망 없음, 판정 없음).
 아래 context_distill은 완료(B−C≈0)된 직전 실험이다.
 
 # 직전 요청: 문맥 비대칭 자기증류

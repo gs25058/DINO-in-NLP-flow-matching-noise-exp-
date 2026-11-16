@@ -87,3 +87,13 @@ context_teacher_full_20261116은 trial 0..2 완료 뒤 감사 버그로 멈췄�
 trial 간에도 같다고 요구했으나 full 설계는 노이즈 설정을 튜닝한다. 같은 trial의 B/C noise는 일치했다.
 감사를 (seed, 노이즈 설정 hash) 단위로 고친 뒤 같은 설계·예산으로 context_teacher_full_20261116b를 새로 시작한다.
 이전 3 trial은 보존하되 새 study에 넣지 않는다(test 미관찰).
+
+## 중단 (2026-11-16, 사용자 결정)
+
+context_teacher_full_20261116b는 arm당 search 15/40 trial 완료 후(trial 15 실행 중) 사용자 결정으로 중단했다.
+확인·대조·test는 미실행이며 판정은 없다. 산출물은 보존한다.
+search 결과(seed42, late dev): B 최고 70.78(t13), C 최고 67.92(t12); 참고 A(tuned) dev last 3seed 평균 약71.7.
+29 완료 trial에서 late dev와의 상관: sharpening 비(student/teacher temp) −0.60, log batch_KL −0.58,
+768d 유효 rank +0.72. 강한 sharpening은 균등 붕괴를 막았으나 rank 붕괴(약140)로 더 나빴고,
+상위 trial은 teacher temp>student temp로 teacher가 거의 균등(H_pt≈9.01)인, 즉 DINO 신호가 사실상 꺼진 설정이었다.
+탐색 범위 안에서 teacher가 살아 있으면서 안정적인 영역은 찾지 못했다(전역 결론은 아님).
