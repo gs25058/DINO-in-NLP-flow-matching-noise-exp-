@@ -4,6 +4,8 @@
 C2 동결, C3 단어 임베딩 k-means 8192. 조건 차이는 `model.head.head_type/head_freeze`와 조건별 독립 Optuna(40 trial)다.
 키가 없으면 기존 head와 bit-identical이다. [MASK] pooling·BoW anchor·토큰 soft MLM은 범위 밖이다.
 완료(2026-11-17, [결과](docs/experiments/vocab_proto/RESULTS.md)): C1 STS7 best 69.00 vs C0 67.10(P1 성립), 단 best는 step≤1250이고 last는 C0보다 낮다.
+후속 완료(2026-11-18, [late_drop 결과](docs/experiments/late_drop/RESULTS.md)): 후반 하락 원인은 teacher sharpening과 EMA 추적이다.
+그 스케줄을 튜닝한 C1/C2는 새 seed last STS7이 69.11/69.31로 C0 67.10보다 높다(R1–R3 모두 성립).
 
 # 직전 요청: 문맥을 읽는 teacher (local→global)
 
