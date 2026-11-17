@@ -18,7 +18,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 BLOCKED_OWNERS = {"gs25009", "gs25049"}
-MAX_PROCESSES = 2
+# Default account limit is 2 (GPU_POLICY.md). FLOWDINO_GPU_MAX_PROCESSES raises it only when the
+# user explicitly lifts the limit for a run; the per-GPU rules below (blocked owners, one process
+# per GPU, idle-only) are never relaxed.
+MAX_PROCESSES = int(os.environ.get("FLOWDINO_GPU_MAX_PROCESSES", "2"))
 
 
 def snapshot():
@@ -60,7 +63,7 @@ def admission_reason(gpu, gpus, processes, reservations, owner, min_free_mib=350
     own_uuids = {p["uuid"] for p in processes if p["owner"] == owner}
     pending = sum(r["uuid"] not in own_uuids for r in reservations)
     if len(own) + pending >= MAX_PROCESSES:
-        return "account GPU process limit (2), including pending starts"
+        return f"account GPU process limit ({MAX_PROCESSES}), including pending starts"
     occupants = [p for p in processes if p["uuid"] == selected["uuid"]]
     if any(p["owner"] in BLOCKED_OWNERS for p in occupants):
         return "GPU is used by a blocked owner (gs25009/gs25049)"

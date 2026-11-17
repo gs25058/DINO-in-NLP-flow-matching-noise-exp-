@@ -115,6 +115,20 @@ def head_options(head, root, seed):
     return options
 
 
+def late_teacher_temp(step, temperature, loss, max_steps):
+    """Late sharpening relaxation: from start, cosine-blend the scheduled teacher temperature
+    toward ``teacher_temp_late_ratio × student_temp`` over ``teacher_temp_late_frac`` of training."""
+    start = int(loss["teacher_temp_late_start_frac"] * max_steps)
+    if step < start:
+        return temperature
+    duration = int(loss["teacher_temp_late_frac"] * max_steps)
+    progress = min(1.0, (step - start) / duration) if duration > 0 else 1.0
+    target = loss["teacher_temp_late_ratio"] * loss["student_temp"]
+    if progress >= 1.0:
+        return float(target)
+    return temperature + (target - temperature) * (1 - math.cos(math.pi * progress)) / 2
+
+
 def cosine_ramp(step, start, end, duration):
     progress = min(max(step / duration, 0.0), 1.0) if duration > 0 else 1.0
     return start + (end - start) * (1 - math.cos(math.pi * progress)) / 2
@@ -303,6 +317,8 @@ class Trainer:
             loss_cfg["teacher_temp"],
             self.temp_steps,
         )
+        if "teacher_temp_late_ratio" in loss_cfg:
+            temperature = late_teacher_temp(step, temperature, loss_cfg, self.cfg["train"]["max_steps"])
         if getattr(self, "intervention", None) is not None:
             temperature = self.intervention.teacher_temp(step, temperature, loss_cfg)
         losses = self.objective(
@@ -377,6 +393,9 @@ class Trainer:
         self.teacher.momentum = cosine_ramp(
             step, train["momentum_start"], train["momentum_end"], self.momentum_steps
         )
+        if "teacher_freeze_frac" in train and step >= int(train["teacher_freeze_frac"] * train["max_steps"]):
+            # Late teacher freeze: the EMA stops tracking the student (momentum 1 is exact).
+            self.teacher.momentum = 1.0
         if getattr(self, "intervention", None) is not None:
             self.teacher.momentum = self.intervention.teacher_momentum(step, self.teacher.momentum)
         self.teacher.update(self.student)

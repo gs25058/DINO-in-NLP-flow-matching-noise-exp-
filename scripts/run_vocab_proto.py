@@ -45,7 +45,7 @@ def run_name(campaign, label, seed):
     return f"vproto_{campaign.name}_{label}_s{seed}"
 
 
-def train(campaign, manifest, children, gpu, cfg, label, seed, smoke=False, trial=None):
+def train(campaign, manifest, children, gpu, cfg, label, seed, smoke=False, trial=None, report="best"):
     cfg = copy.deepcopy(cfg)
     cfg.update(seed=seed, run_name=run_name(campaign, label, seed))
     for key in DATA_KEYS:
@@ -63,7 +63,7 @@ def train(campaign, manifest, children, gpu, cfg, label, seed, smoke=False, tria
         if smoke:
             command += ["--stop-after-steps", "60"]
         children.run(gpu, f"train_{label}_s{seed}", command, trial=trial,
-                     evaluation_path=log / "evaluations.jsonl", report="best")
+                     evaluation_path=log / "evaluations.jsonl", report=report)
     metrics = read_json(log / "completion.json") if smoke else complete_record(log / "completion.json")
     if smoke and (metrics["status"] != "smoke_complete" or metrics["completed_steps"] != 60):
         raise RuntimeError("60-step smoke incomplete")
