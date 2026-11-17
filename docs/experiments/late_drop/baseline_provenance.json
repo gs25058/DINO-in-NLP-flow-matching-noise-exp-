@@ -1,0 +1,10 @@
+{
+  "source_campaign": "results/experiments/vocab_proto_20261116",
+  "original_runs": {
+    "C2_t9_s42": "vproto_vocab_proto_20261116_search_C2_t9_s42",
+    "C2_t9_s43": "vproto_vocab_proto_20261116_confirm_C2_t9_s43",
+    "C1_t16_s42": "vproto_vocab_proto_20261116_search_C1_t16_s42"
+  },
+  "original_source_commit": "35d74f3",
+  "note": "Intervened runs must reproduce these logs exactly before step 1000."
+}

@@ -1,0 +1,6 @@
+{
+  "before_tests": 133,
+  "after_tests": 141,
+  "new_tests": "tests/test_intervention.py (8): each kind is inert before from_step, changes only its own factor after, draws no RNG; unit-momentum freeze is exact; invalid configs rejected",
+  "default_path": "no intervention key → no hook code runs; the campaign additionally checks bit-identical pre-switch logs against the original runs"
+}

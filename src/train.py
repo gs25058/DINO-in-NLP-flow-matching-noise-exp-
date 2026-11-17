@@ -232,6 +232,10 @@ class Trainer:
         self.momentum_steps = max(1, int(train["momentum_ramp_frac"] * train["max_steps"]))
         self.gradient_steps = set(train["component_grad_steps"])
         self.best_sts, self.best_step = -float("inf"), -1
+        self.intervention = None
+        if "intervention" in cfg:
+            from src.intervention import Intervention
+            self.intervention = Intervention(cfg["intervention"])
         self.teacher_input = train.get("teacher_input", "student")
         if self.teacher_input not in ("student", "ema"):
             raise ValueError("teacher_input must be student or ema")
@@ -299,6 +303,8 @@ class Trainer:
             loss_cfg["teacher_temp"],
             self.temp_steps,
         )
+        if getattr(self, "intervention", None) is not None:
+            temperature = self.intervention.teacher_temp(step, temperature, loss_cfg)
         losses = self.objective(
             views.teacher.logits,
             views.student_embeddings,
@@ -371,6 +377,8 @@ class Trainer:
         self.teacher.momentum = cosine_ramp(
             step, train["momentum_start"], train["momentum_end"], self.momentum_steps
         )
+        if getattr(self, "intervention", None) is not None:
+            self.teacher.momentum = self.intervention.teacher_momentum(step, self.teacher.momentum)
         self.teacher.update(self.student)
         return diagnostics
 
@@ -501,6 +509,8 @@ class Trainer:
                 order.update(struct.pack(f"<{len(indices)}I", *indices))
                 if first_indices is None:
                     first_indices = indices
+            if getattr(self, "intervention", None) is not None:
+                self.intervention.begin(self, step)
             result = self.training_step([self.sentences[i] for i in indices], step)
             if getattr(self, "context_views", None) is not None:
                 info = self.context_step_info
