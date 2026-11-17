@@ -74,3 +74,10 @@ C2에서는 sharpen_off·teacher_freeze가 lr_zero보다 late dev가 높다. 멈
 - 동시 실행: 사용자가 2026-11-17 긴급 상황을 이유로 계정 2개 제한을 이번 작업에 한해 해제했다. 유휴 GPU 4개(5–8)에 4 slot으로
   실행하며(조건당 동시 2 trial, TPE constant liar), gs25009/gs25049 GPU 제외·GPU당 1 프로세스·유휴 GPU만 사용 규칙은 그대로다.
   gpu_guard의 기본 상한 2는 바꾸지 않았고, 실행할 때만 `FLOWDINO_GPU_MAX_PROCESSES`로 올린다.
+
+## 동결 전 test 열람 공개 (2026-11-17, 사용자 요청)
+
+확인 단계 도중(21개 중 4개 완료) 사용자 요청으로 탐색 seed 42의 최고 run 2개(C2 trial 35, C1 trial 30)와
+C0 t13 seed 42의 best/last checkpoint에서 STS7을 계산했다(`pre_freeze_test_seen.json`, `scripts/full_metrics_by_space.py`).
+선택 규칙(seed 101–103 late dev 평균)은 이미 고정된 기계적 규칙이라 바꾸지 않는다. 이 시점부터 `selection.json`의
+`test_scores_seen: false`는 "확인 run(seed 101–103)의 test를 보지 않았다"는 뜻이며, 보고서에도 이 열람을 공개한다.
